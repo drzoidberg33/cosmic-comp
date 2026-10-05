@@ -49,6 +49,8 @@ pub enum Stage<'a> {
         workspace: &'a Workspace,
         offset: Point<i32, Logical>,
     },
+    /// Floating windows of another output's active workspace that reach onto this output.
+    SpanningWorkspace(&'a Workspace),
     Workspace {
         workspace: &'a Workspace,
         offset: Point<i32, Logical>,
@@ -419,6 +421,19 @@ fn render_input_order_internal<R: 'static>(
     // sticky windows
     if element_filter != ElementFilter::LayerShellOnly {
         callback(Stage::Sticky(&set.sticky_layer))?;
+    }
+
+    // floating windows of other outputs reaching onto this one
+    if element_filter != ElementFilter::LayerShellOnly && !has_fullscreen {
+        for (other, other_set) in shell.workspaces.sets.iter() {
+            if other == output {
+                continue;
+            }
+            let workspace = &other_set.workspaces[other_set.active];
+            if workspace.spans_onto(output, seat) {
+                callback(Stage::SpanningWorkspace(workspace))?;
+            }
+        }
     }
 
     if element_filter != ElementFilter::LayerShellOnly {

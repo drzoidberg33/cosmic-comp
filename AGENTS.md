@@ -208,10 +208,18 @@ regression.
   - `refresh`: `Common::refresh`.
 - Rounds alternate baseline and candidate (`--rounds N`, default 3). The comparison uses the
   median over rounds of each metric's median.
-- A metric regresses only when it is slower than both the relative and the absolute
-  threshold allow (see `threshold()` in `bench.rs`). Scenarios with spanning windows have
-  looser render and input thresholds, because drawing and hit-testing a window on two
-  outputs is real extra work. Non-spanning scenarios must stay within noise of the baseline.
+- Limits are set in `threshold()` in `bench.rs`:
+  - **Non-spanning scenarios** must stay within noise of the baseline. A metric regresses
+    only when it exceeds both a relative and an absolute threshold (render +10% & +50µs,
+    input +15% & +0.5µs, refresh +15% & +5µs). An A/A run stays within ±4%.
+  - **Spanning scenarios** do work the baseline can't do: drawing windows on a second output
+    costs about as much as drawing them on their home output, and overhang points hit
+    windows instead of empty desktop. A relative limit can't tell that apart from waste, so
+    they get absolute budgets: render +300µs per output and frame (~1.8% of a 60Hz frame),
+    input +5µs per lookup, and refresh +15µs.
+  - Measured with the span feature (5 rounds): non-spanning scenarios within noise.
+    Worst spanning cases: render +165µs (5 windows overhanging one output), input +3.3µs (4
+    outputs), refresh +6.2µs.
 - `--filter SUBSTR` runs a subset, and `--json FILE` writes the comparison.
   `test-harness/target/release/bench run --binary BIN` measures a single build.
 - Results depend on the machine and its load. Close heavy programs and compare A/B runs
@@ -300,6 +308,50 @@ Notes relevant to multi-output work:
   (`as_global`, `to_local(&output)`, `to_global(&output)`, `as_logical`, ...). Never mix them
   with raw `.loc` arithmetic across spaces.
 
+### Spanning windows (the fork's feature)
+
+Floating windows stay owned by one workspace on one ("home") output. Wherever they reach onto
+other outputs, those outputs draw and hit-test them as well. Tests are in
+`test-harness/tests/span.rs`.
+
+- **Stacking:** `Stage::SpanningWorkspace(&Workspace)` in `render_input_order`
+  (`src/shell/focus/order.rs`) is emitted for every *other* output's active workspace that
+  `Workspace::spans_onto(output, seat)` reports. It sits below sticky windows and above this
+  output's own workspace windows, and is skipped while this output shows a fullscreen window.
+  It's consumed in three places, which must stay in sync:
+  - `workspace_elements` (render),
+  - `State::element_under`,
+  - `State::surface_under`.
+- **Rendering:** `FloatingLayout::render_on(target, ...)` renders the layout for any output.
+  It offsets positions by `home.loc - target.loc` and uses the target's scale.
+  `FloatingLayout::render` is `render_on(home)`. The resize indicator only draws on the home
+  output.
+- **Hit-testing:** the floating layer's `toplevel_*_under` take home-local coordinates and
+  don't bounds-check, so global positions on other outputs are converted with
+  `to_local(home)`. `Workspace::*_under` do bounds-check against their own output.
+- **Output enter/leave:** `FloatingLayout::update_spanned_outputs(outputs)` sends
+  `output_enter`/`output_leave` for non-home outputs and records them in `spanned_outputs`.
+  The smithay `Space` only tracks the home output. `Workspaces::refresh` calls it for every
+  workspace (all outputs for the active one, none for hidden ones) *before* the sets refresh
+  their spaces. `FloatingLayout::unmap` sends the leave events right away, so a move grab or
+  another layout starts from a clean state.
+- **Visibility:** `Workspace::floating_visible` (no focused fullscreen surface) is shared by
+  `render`, `render_popups` and `spans_onto`.
+- **Performance:** keep the cost for non-spanning setups at zero and avoid waste on spanning
+  ones (see the benchmark section for the numbers):
+  - `render_on` skips windows that don't touch the target before building their elements.
+  - Overlap checks use window geometry, not `bbox()`, which walks surface trees.
+  - `update_spanned_outputs` does nothing for hidden workspaces or when there are no other
+    outputs, and only computes bboxes for windows that extend beyond their output.
+  - smithay `Space` lookups (`element_geometry`, `element_location`, ...) are linear, so loops
+    over elements are O(n²). Avoid adding more passes over all elements per frame or per
+    pointer event.
+- **Known limitations:**
+  - Only floating windows span; tiled, maximized, fullscreen and sticky windows don't.
+  - Popups (menus) of a spanning window aren't drawn or hit-tested on other outputs yet.
+  - Windows spanning onto another output always stack above that output's own windows.
+  - The overhang doesn't follow the home output's workspace-switch animation; it pops.
+  - Foreign-toplevel output membership (panels and docks) is still the home output only.
 
 ## Code style
 

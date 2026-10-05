@@ -1051,6 +1051,27 @@ where
                     },
                 );
             }
+            Stage::SpanningWorkspace(workspace) => {
+                workspace.render_spanning(
+                    renderer,
+                    output,
+                    last_active_seat,
+                    active_hint,
+                    theme.cosmic(),
+                    scanout_node,
+                    &mut |elem| {
+                        if let Some(elem) = crop_to_output(elem) {
+                            elements.push(CosmicElement::Workspace(
+                                RelocateRenderElement::from_element(
+                                    elem,
+                                    (0, 0),
+                                    Relocate::Relative,
+                                ),
+                            ));
+                        }
+                    },
+                );
+            }
             Stage::Workspace { workspace, offset } => {
                 workspace.render(
                     renderer,

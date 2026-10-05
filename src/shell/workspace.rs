@@ -1612,6 +1612,65 @@ impl Workspace {
         }
     }
 
+    /// Whether floating windows are shown, i.e. not hidden behind a focused fullscreen surface.
+    fn floating_visible(&self, focused: Option<&FocusTarget>) -> bool {
+        !matches!(focused, Some(FocusTarget::Fullscreen(_)))
+            || self
+                .fullscreen_surfaces
+                .iter()
+                .any(|f| f.start_at.is_some() || f.ended_at.is_some())
+            || self
+                .fullscreen_surfaces
+                .iter()
+                .all(|f| !f.alive() || f.ended_at.is_some())
+    }
+
+    /// Whether floating windows of this workspace are shown on `output`, which isn't the
+    /// workspace's own output, because they reach across onto it.
+    pub fn spans_onto(&self, output: &Output, seat: &Seat<State>) -> bool {
+        self.output != *output
+            && self.floating_visible(self.focus_stack.get(seat).last())
+            && self.floating_layer.overlaps_output(output)
+    }
+
+    /// Renders the floating windows that reach onto `target`, another output than the
+    /// workspace's own, positioned relative to `target`.
+    #[profiling::function]
+    pub fn render_spanning<R>(
+        &self,
+        renderer: &mut R,
+        target: &Output,
+        last_active_seat: &Seat<State>,
+        indicator_thickness: u8,
+        theme: &CosmicTheme,
+        scanout_node: Option<DrmNode>,
+        push: &mut dyn FnMut(WorkspaceRenderElement<R>),
+    ) where
+        R: AsGlowRenderer,
+        R::TextureId: Send + Clone + 'static,
+        CosmicMappedRenderElement<R>: RenderElement<R>,
+        CosmicWindowRenderElement<R>: RenderElement<R>,
+        CosmicStackRenderElement<R>: RenderElement<R>,
+        WorkspaceRenderElement<R>: RenderElement<R>,
+    {
+        let focused = self.focus_stack.get(last_active_seat).last().cloned();
+        let focused = focused.as_ref().and_then(|target| match target {
+            FocusTarget::Window(mapped) => Some(mapped),
+            _ => None,
+        });
+        self.floating_layer.render_on(
+            renderer,
+            target,
+            focused,
+            None,
+            indicator_thickness,
+            1.0,
+            theme,
+            scanout_node,
+            &mut |elem| push(elem.into()),
+        );
+    }
+
     #[profiling::function]
     pub fn render<'a, R>(
         &self,
@@ -1735,17 +1794,7 @@ impl Workspace {
             };
         }
 
-        let any_fullscreen_animating = self
-            .fullscreen_surfaces
-            .iter()
-            .any(|f| f.start_at.is_some() || f.ended_at.is_some());
-        if !matches!(focused, Some(FocusTarget::Fullscreen(_)))
-            || any_fullscreen_animating
-            || self
-                .fullscreen_surfaces
-                .iter()
-                .all(|f| !f.alive() || f.ended_at.is_some())
-        {
+        if self.floating_visible(focused.as_ref()) {
             // floating surfaces
             let alpha = match &overview.0 {
                 OverviewMode::Started(_, started) => {
@@ -1922,17 +1971,7 @@ impl Workspace {
             );
         }
 
-        let any_fullscreen_animating = self
-            .fullscreen_surfaces
-            .iter()
-            .any(|f| f.start_at.is_some() || f.ended_at.is_some());
-        if !matches!(focus_stack.last(), Some(FocusTarget::Fullscreen(_)))
-            || any_fullscreen_animating
-            || self
-                .fullscreen_surfaces
-                .iter()
-                .all(|f| !f.alive() || f.ended_at.is_some())
-        {
+        if self.floating_visible(focus_stack.last()) {
             // floating surfaces
             let alpha = match &overview.0 {
                 OverviewMode::Started(_, started) => {

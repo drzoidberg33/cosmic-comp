@@ -1323,6 +1323,17 @@ impl Workspaces {
             }
         }
 
+        // Before the spaces refresh, so a window that just moved to another output's space gets
+        // its leave for that output first and the enter from its new space afterwards.
+        let outputs = self.sets.keys().cloned().collect::<Vec<_>>();
+        for set in self.sets.values_mut() {
+            let active = set.active;
+            for (idx, workspace) in set.workspaces.iter_mut().enumerate() {
+                let visible = if idx == active { &outputs[..] } else { &[] };
+                workspace.floating_layer.update_spanned_outputs(visible);
+            }
+        }
+
         for set in self.sets.values_mut() {
             set.refresh()
         }

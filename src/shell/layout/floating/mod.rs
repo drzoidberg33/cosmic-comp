@@ -59,6 +59,9 @@ pub struct FloatingLayout {
     spawn_order: Vec<CosmicMapped>,
     animations: HashMap<CosmicMapped, Animation>,
     hovered_stack: Option<(CosmicMapped, Rectangle<i32, Local>)>,
+    /// Outputs other than the layout's own that windows reach onto, with the overlap last sent
+    /// via `output_enter`. See [`FloatingLayout::update_spanned_outputs`].
+    spanned_outputs: HashMap<CosmicMapped, SmallVec<[(Output, Rectangle<i32, Logical>); 2]>>,
     dirty: AtomicBool,
     pub theme: cosmic::Theme,
     pub appearance: AppearanceConfig,
@@ -707,6 +710,10 @@ impl FloatingLayout {
         }
 
         self.space.unmap_elem(window);
+        // Whoever maps the window next (another layout, a move grab) tracks its outputs again.
+        for (output, _) in self.spanned_outputs.remove(window).into_iter().flatten() {
+            window.output_leave(&output);
+        }
         if let Some(pos) = self.spawn_order.iter().position(|w| w == window) {
             self.spawn_order.truncate(pos);
         }
@@ -1408,6 +1415,87 @@ impl FloatingLayout {
         }
     }
 
+    /// Whether any window of this layout reaches onto `output`, which may be another output than
+    /// the layout's own.
+    pub fn overlaps_output(&self, output: &Output) -> bool {
+        let Some(home) = self.space.outputs().next() else {
+            return false;
+        };
+        if home == output {
+            return false;
+        }
+        let home = home.geometry().as_logical();
+        let target = output.geometry().as_logical();
+        // Window geometry, not the bbox: computing bboxes walks the surface trees, and a shadow
+        // alone reaching onto another output isn't worth drawing there.
+        self.space.elements().any(|elem| {
+            self.space
+                .element_geometry(elem)
+                .is_some_and(|mut geometry| {
+                    geometry.loc += home.loc;
+                    !home.contains_rect(geometry) && geometry.overlaps(target)
+                })
+        })
+    }
+
+    /// Sends `output_enter`/`output_leave` for the outputs in `outputs`, other than the layout's
+    /// own, that windows reach onto. The space only tracks the layout's own output. Pass no
+    /// outputs to leave all of them, e.g. while the workspace is hidden.
+    pub fn update_spanned_outputs(&mut self, outputs: &[Output]) {
+        let home = self.space.outputs().next().cloned();
+        // false-positive: `CosmicMapped`s hash is based on its inner ptr
+        #[allow(clippy::mutable_key_type)]
+        let mut spanned = HashMap::new();
+        if let Some(home) = home.as_ref()
+            && outputs.iter().any(|o| o != home)
+        {
+            let home_geometry = home.geometry().as_logical();
+            for elem in self.space.elements() {
+                // Geometry first, it's cheap. Only windows reaching past their output need more.
+                let Some(mut geometry) = self.space.element_geometry(elem) else {
+                    continue;
+                };
+                geometry.loc += home_geometry.loc;
+                if home_geometry.contains_rect(geometry) {
+                    continue;
+                }
+                let Some(mut bbox) = self.space.element_bbox(elem) else {
+                    continue;
+                };
+                bbox.loc += home_geometry.loc;
+                let previous = self.spanned_outputs.get(elem);
+                let mut entered = SmallVec::<[_; 2]>::new();
+                for output in outputs.iter().filter(|o| *o != home) {
+                    let Some(mut overlap) = output.geometry().as_logical().intersection(geometry)
+                    else {
+                        continue;
+                    };
+                    // `output_enter` expects the overlap relative to the element
+                    overlap.loc -= bbox.loc;
+                    if previous.is_none_or(|p| !p.contains(&(output.clone(), overlap))) {
+                        elem.output_enter(output, overlap);
+                    }
+                    entered.push((output.clone(), overlap));
+                }
+                if !entered.is_empty() {
+                    spanned.insert(elem.clone(), entered);
+                }
+            }
+        }
+
+        for (elem, previous) in self.spanned_outputs.drain() {
+            for (output, _) in previous {
+                if !spanned
+                    .get(&elem)
+                    .is_some_and(|e: &SmallVec<[_; 2]>| e.iter().any(|(o, _)| *o == output))
+                {
+                    elem.output_leave(&output);
+                }
+            }
+        }
+        self.spanned_outputs = spanned;
+    }
+
     pub fn animations_going(&self) -> bool {
         self.dirty.swap(false, Ordering::SeqCst) || !self.animations.is_empty()
     }
@@ -1487,6 +1575,42 @@ impl FloatingLayout {
         &self,
         renderer: &mut R,
         focused: Option<&CosmicMapped>,
+        resize_indicator: Option<(ResizeMode, ResizeIndicator)>,
+        indicator_thickness: u8,
+        alpha: f32,
+        theme: &cosmic::theme::CosmicTheme,
+        scanout_node: Option<DrmNode>,
+        push: &mut dyn FnMut(CosmicMappedRenderElement<R>),
+    ) where
+        R: AsGlowRenderer,
+        R::TextureId: Send + Clone + 'static,
+        CosmicMappedRenderElement<R>: RenderElement<R>,
+        CosmicWindowRenderElement<R>: RenderElement<R>,
+        CosmicStackRenderElement<R>: RenderElement<R>,
+    {
+        let output = self.space.outputs().next().unwrap().clone();
+        self.render_on(
+            renderer,
+            &output,
+            focused,
+            resize_indicator,
+            indicator_thickness,
+            alpha,
+            theme,
+            scanout_node,
+            push,
+        )
+    }
+
+    /// Renders the windows of this layout for `target`, which may be a different output than
+    /// the layout's own, for windows spanning multiple outputs. Elements are positioned relative
+    /// to `target` and use its scale.
+    #[profiling::function]
+    pub fn render_on<R>(
+        &self,
+        renderer: &mut R,
+        target: &Output,
+        focused: Option<&CosmicMapped>,
         mut resize_indicator: Option<(ResizeMode, ResizeIndicator)>,
         indicator_thickness: u8,
         alpha: f32,
@@ -1501,11 +1625,17 @@ impl FloatingLayout {
         CosmicStackRenderElement<R>: RenderElement<R>,
     {
         let output = self.space.outputs().next().unwrap();
+        let is_home = output == target;
         let output_geometry = {
             let layers = layer_map_for_output(output);
             layers.non_exclusive_zone()
         };
-        let output_scale = output.current_scale().fractional_scale();
+        let output_scale = target.current_scale().fractional_scale();
+        // Translates from this layout's local coordinates to `target`'s.
+        let offset = (output.geometry().loc - target.geometry().loc)
+            .as_logical()
+            .as_local();
+        let target_area = Rectangle::from_size(target.geometry().size.as_local());
         let mut lower_elements = SmallVec::<[_; 4]>::new_const();
 
         for elem in self
@@ -1520,19 +1650,25 @@ impl FloatingLayout {
                 .get(elem)
                 .map(|anim| (*anim.previous_geometry(), alpha * anim.alpha()))
                 .unwrap_or_else(|| (self.space.element_geometry(elem).unwrap().as_local(), alpha));
+            geometry.loc += offset;
+            if !is_home && !target_area.overlaps(geometry) {
+                continue;
+            }
             let render_location = geometry.loc - elem.geometry().loc.as_local();
 
             let maybe_map = if let Some(anim) = self.animations.get(elem) {
-                let original_geo = anim.previous_geometry();
+                let mut original_geo = *anim.previous_geometry();
+                original_geo.loc += offset;
                 geometry = anim.geometry(
                     output_geometry,
                     self.space
                         .element_geometry(elem)
                         .map(RectExt::as_local)
-                        .unwrap_or(geometry),
+                        .unwrap_or(*anim.previous_geometry()),
                     elem.floating_tiled.lock().unwrap().as_ref(),
                     self.gaps(),
                 );
+                geometry.loc += offset;
 
                 let buffer_size = elem.geometry().size;
                 let scale = Scale {
@@ -1591,7 +1727,7 @@ impl FloatingLayout {
                 let active_window_hint = crate::theme::active_window_hint(theme);
                 let radius = elem.corner_radius(geometry.size.as_logical(), indicator_thickness);
 
-                if let Some((mode, resize)) = resize_indicator.as_mut() {
+                if is_home && let Some((mode, resize)) = resize_indicator.as_mut() {
                     let mut resize_geometry = geometry;
                     resize_geometry.loc -= (18, 18).into();
                     resize_geometry.size += (36, 36).into();

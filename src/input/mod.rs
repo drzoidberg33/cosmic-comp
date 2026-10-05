@@ -2854,6 +2854,14 @@ impl State {
                             return ControlFlow::Break(Ok(Some(element)));
                         }
                     }
+                    Stage::SpanningWorkspace(workspace) => {
+                        if let Some(element) = workspace
+                            .floating_layer
+                            .toplevel_element_under(global_pos.to_local(workspace.output()), seat)
+                        {
+                            return ControlFlow::Break(Ok(Some(element)));
+                        }
+                    }
                     Stage::Workspace { workspace, offset } => {
                         let location = global_pos + offset.as_global().to_f64();
                         let output = workspace.output();
@@ -3010,6 +3018,16 @@ impl State {
                         let global_pos = global_pos + offset.to_f64().as_global();
                         if let Some(under) =
                             workspace.popup_surface_under(global_pos, overview.clone(), seat)
+                        {
+                            return ControlFlow::Break(Ok(Some(under)));
+                        }
+                    }
+                    Stage::SpanningWorkspace(workspace) => {
+                        let home = workspace.output();
+                        if let Some(under) = workspace
+                            .floating_layer
+                            .toplevel_surface_under(global_pos.to_local(home), seat)
+                            .map(|(target, point)| (target, point.to_global(home)))
                         {
                             return ControlFlow::Break(Ok(Some(under)));
                         }
