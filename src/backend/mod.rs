@@ -11,6 +11,7 @@ use tracing::{info, warn};
 
 pub mod render;
 
+pub mod headless;
 pub mod kms;
 pub mod winit;
 pub mod x11;
@@ -26,6 +27,7 @@ pub fn init_backend_auto(
         Ok(x) if x == "x11" => x11::init_backend(dh, event_loop, state),
         Ok(x) if x == "winit" => winit::init_backend(dh, event_loop, state),
         Ok(x) if x == "kms" => kms::init_backend(dh, event_loop, state),
+        Ok(x) if x == "headless" => headless::init_backend(dh, event_loop, state),
         Ok(_) => unimplemented!("There is no backend with this identifier"),
         Err(_) => {
             if std::env::var_os("DISPLAY").is_some()

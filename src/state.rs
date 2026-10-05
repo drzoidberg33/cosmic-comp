@@ -2,6 +2,7 @@
 
 use crate::{
     backend::{
+        headless::HeadlessState,
         kms::{KmsGuard, KmsState},
         render::{GlMultiError, RendererRef},
         winit::WinitState,
@@ -335,6 +336,7 @@ pub enum BackendData {
     X11(X11State),
     Winit(WinitState),
     Kms(KmsState),
+    Headless(HeadlessState),
     // TODO
     // Wayland(WaylandState),
     Unset,
@@ -344,6 +346,7 @@ pub enum LockedBackend<'a> {
     X11(&'a mut X11State),
     Winit(&'a mut WinitState),
     Kms(KmsGuard<'a>),
+    Headless(&'a mut HeadlessState),
 }
 
 #[derive(Debug, Clone)]
@@ -380,6 +383,13 @@ impl BackendData {
         }
     }
 
+    pub fn headless(&mut self) -> &mut HeadlessState {
+        match self {
+            BackendData::Headless(headless_state) => headless_state,
+            _ => unreachable!("Called headless in non headless backend"),
+        }
+    }
+
     pub fn winit(&mut self) -> &mut WinitState {
         match self {
             BackendData::Winit(winit_state) => winit_state,
@@ -394,6 +404,7 @@ impl BackendData {
             // Swapping with damage (which should be empty on these frames) is likely good enough anyway.
             BackendData::X11(state) => state.schedule_render(output),
             BackendData::Kms(state) => state.schedule_render(output),
+            BackendData::Headless(state) => state.schedule_render(output),
             _ => unreachable!("No backend was initialized"),
         }
     }
@@ -412,6 +423,9 @@ impl BackendData {
                 state.backend.renderer().import_dmabuf(&dmabuf, None)?;
             }
             BackendData::X11(state) => {
+                state.renderer.import_dmabuf(&dmabuf, None)?;
+            }
+            BackendData::Headless(state) => {
                 state.renderer.import_dmabuf(&dmabuf, None)?;
             }
             _ => unreachable!("No backend set when importing dmabuf"),
@@ -447,6 +461,7 @@ impl BackendData {
             }
             BackendData::Winit(winit) => Ok(RendererRef::Glow(winit.backend.renderer())),
             BackendData::X11(x11) => Ok(RendererRef::Glow(&mut x11.renderer)),
+            BackendData::Headless(headless) => Ok(RendererRef::Glow(&mut headless.renderer)),
             _ => unreachable!("No backend set when getting offscreen renderer"),
         }
     }
@@ -456,6 +471,7 @@ impl BackendData {
             BackendData::Kms(state) => state.update_screen_filter(screen_filter),
             BackendData::Winit(state) => state.update_screen_filter(screen_filter),
             BackendData::X11(state) => state.update_screen_filter(screen_filter),
+            BackendData::Headless(state) => state.update_screen_filter(screen_filter),
             _ => unreachable!("No backend set when setting screen filters"),
         }
     }
@@ -465,6 +481,7 @@ impl BackendData {
             BackendData::Kms(state) => LockedBackend::Kms(state.lock_devices()),
             BackendData::X11(state) => LockedBackend::X11(state),
             BackendData::Winit(state) => LockedBackend::Winit(state),
+            BackendData::Headless(state) => LockedBackend::Headless(state),
             _ => unreachable!("Tried to lock unset backend"),
         }
     }
@@ -476,6 +493,7 @@ impl LockedBackend<'_> {
             LockedBackend::Kms(state) => state.all_outputs(),
             LockedBackend::X11(state) => state.all_outputs(),
             LockedBackend::Winit(state) => state.all_outputs(),
+            LockedBackend::Headless(state) => state.all_outputs(),
         }
     }
 
@@ -563,6 +581,7 @@ impl LockedBackend<'_> {
             ),
             LockedBackend::Winit(state) => state.apply_config_for_outputs(test_only),
             LockedBackend::X11(state) => state.apply_config_for_outputs(test_only),
+            LockedBackend::Headless(state) => state.apply_config_for_outputs(test_only),
         }?;
 
         let mut shell_ref = shell.write();
@@ -610,6 +629,7 @@ impl LockedBackend<'_> {
                 // Swapping with damage (which should be empty on these frames) is likely good enough anyway.
                 LockedBackend::X11(state) => state.schedule_render(&output),
                 LockedBackend::Kms(state) => state.schedule_render(&output),
+                LockedBackend::Headless(state) => state.schedule_render(&output),
             }
         }
 
