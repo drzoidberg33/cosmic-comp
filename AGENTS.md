@@ -32,6 +32,13 @@ nothing is written down, upstream commit history and maintainer PR review commen
   puts it first on `PATH`; `cosmic-session` runs `cosmic-comp` from `PATH`
   (or its first CLI argument). The stock "COSMIC" session stays as a fallback. Never
   overwrite `/usr/bin/cosmic-comp`.
+- **Working rules:**
+  - Every behavioural change comes with automated tests (`scripts/test.sh`), and testing
+    should need as little human involvement as possible.
+  - Changes to rendering, input hit-testing or refresh paths also get an A/B benchmark run
+    (`scripts/bench.sh`) before committing.
+  - **Keep this file up to date** in the same commit as the change: new commands, helpers,
+    gotchas you hit, design decisions and known limitations. It's the memory of this fork.
 
 ## Setup
 
@@ -105,27 +112,48 @@ in about a second, in parallel, and shows nothing on screen.
 How it works:
 
 - **Headless backend** (`src/backend/headless.rs`, `COSMIC_BACKEND=headless`): virtual
-  outputs from `COSMIC_HEADLESS_OUTPUTS` (`WxH[@scale]`, comma separated), rendered offscreen
+  outputs from `COSMIC_HEADLESS_OUTPUTS` (`WxH[@scale][+X+Y]`, comma separated), rendered offscreen
   with EGL on the first hardware render node (or llvmpipe with `COSMIC_HEADLESS_SOFTWARE=1`).
   Synthetic input goes through the normal `process_input_event` path via a `HeadlessInput`
   `InputBackend`.
 - **Control socket** (`src/backend/headless/control.rs`, path in `COSMIC_HEADLESS_CONTROL`):
-  JSON lines. Commands are `outputs`, `windows`, `pointer`, `pointer_motion`, `pointer_button`,
-  `pointer_axis`, `key` (evdev codes), `screenshot` (renders synchronously to a PNG) and
-  `sync`. The module docs describe the exact protocol. Extend it when a test needs to observe
-  or drive something new, rather than sleeping or guessing.
+  JSON lines. Commands:
+  - `outputs`, `windows`, `pointer`;
+  - `focus` (debug strings of the pointer and keyboard focus targets, useful to find out what
+    a click actually hit);
+  - `pointer_motion`, `pointer_button`, `pointer_axis`, `key` (evdev codes);
+  - `screenshot` (renders synchronously to a PNG) and `sync`;
+  - `bench_*` (see below).
+
+  The module docs describe the exact protocol. Extend it when a test needs to observe or
+  drive something new, rather than sleeping or guessing.
 - **`test-client`** (`test-harness/src/bin/test-client.rs`): a solid-colour xdg_toplevel. It
   reports `configure`, `ready`, `enter`/`leave` (output names), `preferred_buffer_scale`,
-  pointer and keyboard events as JSON lines, and accepts `move`, `set_color`, `sync` and
-  `quit` on stdin.
+  `decoration`, pointer and keyboard events as JSON lines, and accepts `move`, `set_color`,
+  `sync` and `quit` on stdin. The module docs list the exact protocol.
 - **Library** (`test-harness/src/lib.rs`):
   - `Compositor::start(Options)` gives every compositor its own runtime, config and state dirs
     under `$XDG_RUNTIME_DIR/cosmic-comp-test/`, disables the session bus and runs
-    `--no-xwayland`, so the host session is never touched.
-  - `Options::config(component, key, ron)` seeds cosmic-config entries, e.g. workspace mode.
-  - Helpers: `spawn_client`, `windows`/`wait_window`, `drag`/`drag_window_to` (real title-bar
-    drags), `screenshot` → `Image::coverage` for pixel checks, and `Client::entered_outputs`
-    (syncs first).
+    `--no-xwayland`, so the host session is never touched. The Wayland socket is found in the
+    private runtime dir, not in the log.
+  - `Options::outputs("WxH[@scale][+X+Y],...")` sets the number of outputs, their sizes,
+    scales and global logical positions. The default is two 1280x720 outputs side by side.
+    Outputs without `+X+Y` are laid out left to right by name, so give either all or none of
+    them positions. Example, two outputs at the bottom and one centred on top:
+    `1920x1080+0+1080,1920x1080+1920+1080,1920x1080+960+0` (`tests/layouts.rs`). Positions
+    are applied through the regular output-configuration path after startup, so they
+    behave like a layout set in Settings.
+  - `Options::config(component, key, ron)` seeds cosmic-config entries, e.g.
+    `("com.system76.CosmicComp", "workspaces", "(workspace_mode: Global, ...)")`, and
+    `Options::binary` picks the compositor build. System defaults (e.g. shortcuts from
+    `/usr/share/cosmic`) still apply.
+  - Helpers:
+    - `spawn_client`, `windows`/`wait_window`;
+    - `drag`/`drag_window_to` (real title-bar drags);
+    - `chord(&[keys::KEY_LEFTMETA, keys::KEY_2])` for shortcuts (default `Super+N` switches
+      the workspace of the output the pointer is on);
+    - `screenshot`/`wait_screenshot` → `Image::coverage` for pixel checks;
+    - `Client::wait_entered_outputs`/`wait_outputs_where`/`wait_event`.
 - Window geometry from `windows` includes the 36px server-side title bar
   (`HEADER_HEIGHT`). `WindowInfo::content()` is the client area.
 - Failing tests keep their run directory (log, screenshots, config) and print its path. Set
@@ -138,10 +166,23 @@ Writing tests:
 - Assert on what clients and users observe (pixels, `wl_surface.enter/leave`, pointer
   events), plus `windows` for layout. Avoid asserting on implementation details.
 - Synchronise instead of sleeping: control requests are handled in order, `Client::sync`
-  round-trips, and `wait_window`/`wait_event` poll with a 10s timeout.
+  round-trips, and the `wait_*` helpers poll with a 10s timeout. Fixed sleeps are only OK for
+  letting animations finish (workspace switches take about 300ms).
+- **Output enter/leave and other `Shell::refresh` work is throttled to once every 150ms**
+  (`refresh()` in `src/lib.rs`, upstream behaviour). A single `entered_outputs()` snapshot
+  right after a change is racy. Use `wait_entered_outputs`, which also checks that the state
+  is stable across a refresh interval.
+- **Title-bar drags only start if the first motion after the press stays on the 36px title
+  bar.** That's iced drag detection in the server-side header. `Compositor::drag` nudges 4px
+  first; keep that if you write custom drags, or the window silently won't move.
+- **Two clicks at the same spot within 300ms are a double-click**, which maximizes a window
+  when it lands on its title bar. Two drags in a row by the same title bar do exactly that.
+  `Compositor::drag` waits 400ms after the last button release. Keep that in mind for
+  hand-written press/release sequences.
 - Keep `cargo test` green at every commit. A feature's failing tests land together with
   its implementation.
 - Check new tests for flakiness by running them repeatedly, e.g. 20 times in a loop.
+- Don't run tests or other heavy work while `scripts/bench.sh` is measuring.
 
 ## Performance benchmarks (fork-only)
 
@@ -155,8 +196,9 @@ regression.
   incremental. The baseline is built in a git worktree at `target/bench-baseline/` with its
   own target dir. The first run builds it from scratch (a few minutes).
 - Scenarios (`test-harness/src/bin/bench.rs`, list them with `bench list`) cover 1–4
-  outputs, 1–20 floating windows, windows straddling seams, and mixed scales. Each one starts
-  a fresh headless compositor and places windows with real title-bar drags.
+  outputs (including a stacked layout), 1–20 floating windows, windows straddling seams, and
+  mixed scales. Each one starts a fresh headless compositor and places windows with real
+  title-bar drags.
 - Metrics are measured inside the compositor via the control socket's `bench_*` commands,
   so there's no IPC noise:
   - `render/<output>/cpu` and `/total`: a full redraw of each output, until submit and until
@@ -257,6 +299,7 @@ Notes relevant to multi-output work:
   `Logical`/`Physical`. Convert explicitly with the helpers in `utils/prelude.rs`
   (`as_global`, `to_local(&output)`, `to_global(&output)`, `as_logical`, ...). Never mix them
   with raw `.loc` arithmetic across spaces.
+
 
 ## Code style
 

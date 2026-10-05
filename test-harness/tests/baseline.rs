@@ -47,10 +47,7 @@ fn window_maps_on_first_output() {
     assert_eq!(window.output, "HEADLESS-0");
     assert!(window.floating, "{window:?}");
 
-    assert_eq!(
-        client.entered_outputs().unwrap(),
-        ["HEADLESS-0".to_string()].into()
-    );
+    client.wait_entered_outputs(&["HEADLESS-0"]).unwrap();
 
     let output = comp.output("HEADLESS-0").unwrap();
     let shot = comp.screenshot("HEADLESS-0").unwrap();
@@ -92,10 +89,7 @@ fn dragging_title_bar_moves_window_to_other_output() {
 
     let window = comp.drag_window_to("green", (1280 + 200, 100)).unwrap();
     assert_eq!(window.output, "HEADLESS-1");
-    assert_eq!(
-        client.entered_outputs().unwrap(),
-        ["HEADLESS-1".to_string()].into()
-    );
+    client.wait_entered_outputs(&["HEADLESS-1"]).unwrap();
 
     let output = comp.output("HEADLESS-1").unwrap();
     let shot = comp.screenshot("HEADLESS-1").unwrap();

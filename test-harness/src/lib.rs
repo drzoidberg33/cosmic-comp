@@ -483,6 +483,40 @@ impl Compositor {
         Image::load(&path)
     }
 
+    /// Takes screenshots of `output` until `predicate` holds, e.g. after an animation.
+    pub fn wait_screenshot(
+        &mut self,
+        output: &str,
+        what: &str,
+        predicate: impl Fn(&Image) -> bool,
+    ) -> Result<Image> {
+        let deadline = Instant::now() + DEFAULT_TIMEOUT;
+        loop {
+            let image = self.screenshot(output)?;
+            if predicate(&image) {
+                return Ok(image);
+            }
+            if Instant::now() > deadline {
+                return Err(format!(
+                    "timed out waiting for {output} to show {what}, artifacts in {}",
+                    self.dir.display()
+                ));
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// Presses and releases `keys` (evdev codes) as a chord, e.g. `[KEY_LEFTMETA, KEY_2]`.
+    pub fn chord(&mut self, keys: &[u32]) -> Result<()> {
+        for key in keys {
+            self.key(*key, true)?;
+        }
+        for key in keys.iter().rev() {
+            self.key(*key, false)?;
+        }
+        self.request(json!({"cmd": "sync"})).map(|_| ())
+    }
+
     /// Starts a `test-client` window. `args` are passed through (e.g. `--color`, `--width`).
     pub fn spawn_client(&mut self, title: &str, args: &[&str]) -> Result<Client> {
         let binary = client_binary();
@@ -624,9 +658,56 @@ impl Client {
     }
 
     /// Outputs the surface is currently entered on, according to `wl_surface.enter/leave`.
+    ///
+    /// cosmic-comp updates output membership in its refresh pass, which is throttled to once
+    /// every 150ms, so after a change prefer [`Client::wait_entered_outputs`].
     pub fn entered_outputs(&mut self) -> Result<BTreeSet<String>> {
         self.sync()?;
         Ok(self.outputs.clone())
+    }
+
+    /// Waits until the surface is entered on exactly `expected`, then checks it stays that way
+    /// for longer than one refresh interval.
+    pub fn wait_entered_outputs(&mut self, expected: &[&str]) -> Result<()> {
+        let expected = expected
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<BTreeSet<_>>();
+        self.wait_outputs_where(&format!("entered on {expected:?}"), |current| {
+            *current == expected
+        })
+    }
+
+    /// Waits until the set of entered outputs satisfies `predicate`, then checks it still does
+    /// after longer than one refresh interval.
+    pub fn wait_outputs_where(
+        &mut self,
+        what: &str,
+        predicate: impl Fn(&BTreeSet<String>) -> bool,
+    ) -> Result<()> {
+        let deadline = Instant::now() + DEFAULT_TIMEOUT;
+        loop {
+            let current = self.entered_outputs()?;
+            if predicate(&current) {
+                thread::sleep(Duration::from_millis(200));
+                let settled = self.entered_outputs()?;
+                return if predicate(&settled) {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "client {} was {what} but then changed to {settled:?}",
+                        self.title
+                    ))
+                };
+            }
+            if Instant::now() > deadline {
+                return Err(format!(
+                    "client {} is entered on {current:?}, expected to be {what}",
+                    self.title
+                ));
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
     }
 
     /// Events recorded since `index` into [`Client::history`].
@@ -751,4 +832,21 @@ fn wayland_socket(runtime_dir: &Path) -> Option<String> {
                 && entry.file_name().to_string_lossy().starts_with("wayland-")
         })
         .map(|entry| entry.file_name().to_string_lossy().into_owned())
+}
+
+/// evdev key codes (`linux/input-event-codes.h`) for [`Compositor::key`] and
+/// [`Compositor::chord`].
+pub mod keys {
+    pub const KEY_ESC: u32 = 1;
+    pub const KEY_1: u32 = 2;
+    pub const KEY_2: u32 = 3;
+    pub const KEY_3: u32 = 4;
+    pub const KEY_LEFTCTRL: u32 = 29;
+    pub const KEY_LEFTSHIFT: u32 = 42;
+    pub const KEY_LEFTALT: u32 = 56;
+    pub const KEY_UP: u32 = 103;
+    pub const KEY_LEFT: u32 = 105;
+    pub const KEY_RIGHT: u32 = 106;
+    pub const KEY_DOWN: u32 = 108;
+    pub const KEY_LEFTMETA: u32 = 125;
 }

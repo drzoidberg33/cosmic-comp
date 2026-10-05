@@ -98,6 +98,19 @@ fn scenarios() -> Vec<Scenario> {
             spanning: true,
         },
         Scenario {
+            name: "3out-pyramid-3span",
+            outputs: "1920x1080+0+1080,1920x1080+1920+1080,1920x1080+960+0",
+            windows: vec![
+                (300, 1300),
+                (2400, 1300),
+                (1300, 300),
+                (1200, 900),
+                (1720, 900),
+                straddle(1920, 1500),
+            ],
+            spanning: true,
+        },
+        Scenario {
             name: "mixed-scale-1span",
             outputs: "1920x1080,2560x1440@2",
             windows: vec![(200, 200), straddle(1920, 300)],
