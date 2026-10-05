@@ -2583,6 +2583,93 @@ impl Shell {
         }
     }
 
+    /// Moves floating windows that ended up entirely on another output, e.g. by resizing a
+    /// window spanning outputs, to that output's active workspace, keeping their position.
+    /// Windows that are being resized are left alone until the resize finished.
+    fn rehome_floating_windows(&mut self) {
+        let outputs = self
+            .outputs()
+            .map(|o| (o.clone(), o.geometry()))
+            .collect::<Vec<_>>();
+        let mut moves = Vec::new();
+        for (home, set) in self.workspaces.sets.iter() {
+            let workspace = &set.workspaces[set.active];
+            // Only windows reaching onto other outputs can be entirely on one, and those are
+            // tracked already; usually there are none.
+            for mapped in workspace.floating_layer.spanning() {
+                if mapped.resize_state.lock().unwrap().is_some() {
+                    continue;
+                }
+                let Some(geometry) = workspace.floating_layer.space.element_geometry(mapped) else {
+                    continue;
+                };
+                let geometry = geometry.as_local().to_global(home);
+                if geometry.overlaps(home.geometry()) {
+                    continue;
+                }
+                let target = outputs
+                    .iter()
+                    .filter_map(|(output, output_geometry)| {
+                        let overlap = output_geometry.intersection(geometry)?;
+                        Some((output, overlap.size.w * overlap.size.h))
+                    })
+                    .max_by_key(|(_, area)| *area)
+                    .map(|(output, _)| output.clone());
+                if let Some(target) = target {
+                    moves.push((workspace.handle, mapped.clone(), target, geometry.loc));
+                }
+            }
+        }
+
+        for (from, mapped, to_output, location) in moves {
+            let Some(to) = self.workspaces.active(&to_output).map(|(_, w)| w.handle) else {
+                continue;
+            };
+            let from_workspace = self.workspaces.space_for_handle_mut(&from).unwrap();
+            let from_output = from_workspace.output.clone();
+            let focused_seats = self
+                .seats
+                .iter()
+                .filter(|seat| {
+                    from_workspace.focus_stack.get(seat).last()
+                        == Some(&FocusTarget::Window(mapped.clone()))
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            // The new home's space takes over `to_output`, so don't send a leave for it.
+            from_workspace
+                .floating_layer
+                .hand_over_spanned_output(&mapped, &to_output);
+            if from_workspace.unmap_element(&mapped).is_none() {
+                continue;
+            }
+            for (window, _) in mapped.windows() {
+                toplevel_leave_workspace(&window, &from);
+                toplevel_leave_output(&window, &from_output);
+                toplevel_enter_output(&window, &to_output);
+                toplevel_enter_workspace(&window, &to);
+            }
+
+            let to_workspace = self.workspaces.space_for_handle_mut(&to).unwrap();
+            to_workspace.floating_layer.map_internal(
+                mapped.clone(),
+                Some(location.to_local(&to_output)),
+                None,
+                None,
+            );
+            for seat in &focused_seats {
+                to_workspace
+                    .focus_stack
+                    .get_mut(seat)
+                    .append(mapped.clone());
+                // Focus is validated against the focused output, which followed the window.
+                if seat.focused_output().as_ref() == Some(&from_output) {
+                    seat.set_focused_output(Some(&to_output));
+                }
+            }
+        }
+    }
+
     pub fn zoom_state(&self) -> Option<&ZoomState> {
         self.zoom_state.as_ref()
     }
@@ -2640,6 +2727,7 @@ impl Shell {
             }
         }
 
+        self.rehome_floating_windows();
         self.workspaces
             .refresh(workspace_state, xdg_activation_state);
 

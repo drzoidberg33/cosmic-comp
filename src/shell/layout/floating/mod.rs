@@ -1404,7 +1404,12 @@ impl FloatingLayout {
         for element in self
             .space
             .elements()
-            .filter(|e| self.space.outputs_for_element(e).is_empty())
+            // Windows visible on another output are moved there by `Shell::rehome_floating_windows`
+            // instead, once no longer resized.
+            .filter(|e| {
+                self.space.outputs_for_element(e).is_empty()
+                    && !self.spanned_outputs.contains_key(e)
+            })
             .cloned()
             .collect::<Vec<_>>()
             .into_iter()
@@ -1436,6 +1441,20 @@ impl FloatingLayout {
                     !home.contains_rect(geometry) && geometry.overlaps(target)
                 })
         })
+    }
+
+    /// Windows reaching onto outputs other than the layout's own, as of the last
+    /// [`FloatingLayout::update_spanned_outputs`].
+    pub fn spanning(&self) -> impl Iterator<Item = &CosmicMapped> {
+        self.spanned_outputs.keys()
+    }
+
+    /// Stops tracking `output` for `mapped` without sending `output_leave`, before the window
+    /// moves to a layout on that output, which takes over.
+    pub fn hand_over_spanned_output(&mut self, mapped: &CosmicMapped, output: &Output) {
+        if let Some(outputs) = self.spanned_outputs.get_mut(mapped) {
+            outputs.retain(|(o, _)| o != output);
+        }
     }
 
     /// Sends `output_enter`/`output_leave` for the outputs in `outputs`, other than the layout's

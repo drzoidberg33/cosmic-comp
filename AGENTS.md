@@ -366,6 +366,22 @@ other outputs, those outputs draw and hit-test them as well. Tests are in
   across outputs. With it, the edge stuck at the seam and back-and-forth resizing felt
   like stutter. Edge snapping during resizes (`edge_snap_threshold`, default 0 = off) still
   only snaps to the home output's edges.
+- **Re-homing:** a floating window can end up entirely on another output, e.g. after
+  shrinking a spanning window from its far edge.
+  - **What upstream did:** `FloatingLayout::refresh` re-placed (re-centred) any window no
+    longer touching its home output. The window jumped mid-resize.
+  - **What it does now:** that only happens for windows on no output at all (not in
+    `spanned_outputs`). `Shell::rehome_floating_windows`, which runs from `Shell::refresh`
+    before `Workspaces::refresh`, moves such windows to the active workspace of the output
+    holding most of them, at the same global position.
+  - **Mid-resize:** windows with a `resize_state` are skipped, so a grab never has its
+    window moved from under it. The move happens once the resize is done.
+  - **Keeping it seamless:** the move uses `Workspace::unmap_element` (focus stacks,
+    maximized state) and moves the seat's focused output along, otherwise
+    `refresh_focus` drops keyboard focus. `hand_over_spanned_output` skips the redundant
+    `output_leave` for the new home.
+  - **Cost:** it only looks at `FloatingLayout::spanning()`, usually empty, so it costs
+    nothing without spanning windows.
 - **Output enter/leave:** `FloatingLayout::update_spanned_outputs(outputs)` sends
   `output_enter`/`output_leave` for non-home outputs and records them in `spanned_outputs`.
   The smithay `Space` only tracks the home output. `Workspaces::refresh` calls it for every

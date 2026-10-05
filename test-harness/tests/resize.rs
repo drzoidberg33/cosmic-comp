@@ -111,3 +111,72 @@ fn spanning_window_can_be_resized_from_its_overhanging_edge() {
         .unwrap();
     client.wait_entered_outputs(&["HEADLESS-0"]).unwrap();
 }
+
+#[test]
+fn window_shrunk_off_its_home_output_moves_to_the_other_output_in_place() {
+    let mut comp = Compositor::start(Options::default()).unwrap();
+    let mut client = comp
+        .spawn_client("w", &["--color", GREEN, "--width", "1000"])
+        .unwrap();
+    let mapped = comp.wait_window("w", "mapped", |_| true).unwrap();
+    // Drop it by its title bar 700px in, at x = 1400 on HEADLESS-1: 700..1552 belongs to
+    // HEADLESS-1 and reaches onto HEADLESS-0.
+    let grab = 700.0;
+    let from = (
+        mapped.geometry.x as f64 + grab,
+        mapped.geometry.y as f64 + 18.0,
+    );
+    comp.drag(from, (700.0 + grab, 100.0 + 18.0), 30).unwrap();
+    let window = comp
+        .wait_window("w", "placed", |w| {
+            (w.geometry.x, w.geometry.y) == (700, 100)
+        })
+        .unwrap();
+    assert_eq!(window.output, "HEADLESS-1");
+
+    // Pull the right edge back until the window is entirely on HEADLESS-0.
+    client
+        .wait_entered_outputs(&["HEADLESS-0", "HEADLESS-1"])
+        .unwrap();
+    let start = client.history.len();
+    let y = window.geometry.y as f64 + 150.0;
+    comp.pointer_motion((window.geometry.right() as f64 + BORDER, y))
+        .unwrap();
+    comp.button("left", true).unwrap();
+    for _ in 0..40 {
+        comp.pointer_relative((-10.0, 0.0)).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(15));
+        let during = comp.window("w").unwrap();
+        // It used to jump elsewhere as soon as it no longer touched its home output.
+        assert_eq!(
+            (during.geometry.x, during.geometry.y),
+            (700, 100),
+            "{during:?}"
+        );
+    }
+    comp.button("left", false).unwrap();
+
+    let moved = comp
+        .wait_window("w", "on HEADLESS-0", |w| w.output == "HEADLESS-0")
+        .unwrap();
+    assert_eq!((moved.geometry.x, moved.geometry.y), (700, 100));
+    assert!(moved.geometry.right() < 1280, "{moved:?}");
+    client.wait_entered_outputs(&["HEADLESS-0"]).unwrap();
+    assert!(
+        !client
+            .events_since(start)
+            .iter()
+            .any(|e| e["event"] == "keyboard_leave"),
+        "lost keyboard focus: {:?}",
+        client.events_since(start)
+    );
+    // It stayed visible on HEADLESS-0 throughout, so no leave/enter round trip.
+    assert!(
+        !client
+            .events_since(start)
+            .iter()
+            .any(|e| e["event"] == "leave" && e["output"] == "HEADLESS-0"),
+        "{:?}",
+        client.events_since(start)
+    );
+}
