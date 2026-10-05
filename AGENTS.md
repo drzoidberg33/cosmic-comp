@@ -360,6 +360,12 @@ other outputs, those outputs draw and hit-test them as well. Tests are in
 - **Hit-testing:** the floating layer's `toplevel_*_under` take home-local coordinates and
   don't bounds-check, so global positions on other outputs are converted with
   `to_local(home)`. `Workspace::*_under` do bounds-check against their own output.
+- **Resizing:** upstream drops relative pointer motion onto another output while a floating
+  resize grab is active (`ResizeGrabMarker`), because windows used to be confined to one
+  output. That check is removed in `process_input_event`, so resizes follow the pointer
+  across outputs. With it, the edge stuck at the seam and back-and-forth resizing felt
+  like stutter. Edge snapping during resizes (`edge_snap_threshold`, default 0 = off) still
+  only snaps to the home output's edges.
 - **Output enter/leave:** `FloatingLayout::update_spanned_outputs(outputs)` sends
   `output_enter`/`output_leave` for non-home outputs and records them in `spanned_outputs`.
   The smithay `Space` only tracks the home output. `Workspaces::refresh` calls it for every

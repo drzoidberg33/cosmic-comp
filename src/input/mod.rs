@@ -20,10 +20,7 @@ use crate::{
             target::{KeyboardFocusTarget, PointerFocusTarget},
         },
         grabs::{MenuGrab, MoveGrab, ReleaseMode, ResizeEdge, ResizeGrab},
-        layout::{
-            floating::ResizeGrabMarker,
-            tiling::{NodeDesc, SwapWindowGrab, TilingLayout},
-        },
+        layout::tiling::{NodeDesc, SwapWindowGrab, TilingLayout},
         zoom::ZoomState,
     },
     utils::{prelude::*, quirks::workspace_overview_is_open},
@@ -501,19 +498,10 @@ impl State {
                     position.x = position.x.clamp(output_geometry_loc.x, max_x);
                     position.y = position.y.clamp(output_geometry_loc.y, max_y);
 
-                    if ptr.is_grabbed() {
-                        if seat
-                            .user_data()
-                            .get::<ResizeGrabMarker>()
-                            .map(|marker| marker.get())
-                            .unwrap_or(false)
-                            && output != current_output
-                        {
-                            ptr.frame(self);
-                            return;
-                        }
-                        //If the pointer isn't grabbed, we should check if the focused element should be updated
-                    } else if self.common.config.cosmic_conf.focus_follows_cursor {
+                    // Upstream drops motion onto another output during floating resizes. Floating
+                    // windows can span outputs here, so resizes follow the pointer across them.
+                    //If the pointer isn't grabbed, we should check if the focused element should be updated
+                    if !ptr.is_grabbed() && self.common.config.cosmic_conf.focus_follows_cursor {
                         let shell = self.common.shell.read();
                         let old_keyboard_target =
                             State::element_under(original_position, &current_output, &shell, &seat);
