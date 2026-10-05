@@ -92,11 +92,60 @@ default features. Gate feature-specific code with `#[cfg(feature = "...")]`.
 
 There are very few unit tests (`src/backend/render/cursor.rs`, `src/backend/kms/device.rs`,
 `cosmic-comp-config/src/lib.rs`). Maintainers push back on trivial tests, e.g. testing that
-`#[serde(default)]` works. Behaviour is verified by running the compositor.
+`#[serde(default)]` works. Upstream verifies behaviour by running the compositor. This fork
+also has automated integration tests (next section).
+
+## Automated integration tests (fork-only)
+
+**Run `scripts/test.sh` after every behavioural change** and before every commit. It builds
+the compositor (`dev-opt`) and runs `cargo test` in `test-harness/`. Extra arguments go to
+`cargo test`, e.g. `scripts/test.sh --test span` or `scripts/test.sh pointer`. The suite runs
+in about a second, in parallel, and shows nothing on screen.
+
+How it works:
+
+- **Headless backend** (`src/backend/headless.rs`, `COSMIC_BACKEND=headless`): virtual
+  outputs from `COSMIC_HEADLESS_OUTPUTS` (`WxH[@scale]`, comma separated), rendered offscreen
+  with EGL on the first hardware render node (or llvmpipe with `COSMIC_HEADLESS_SOFTWARE=1`).
+  Synthetic input goes through the normal `process_input_event` path via a `HeadlessInput`
+  `InputBackend`.
+- **Control socket** (`src/backend/headless/control.rs`, path in `COSMIC_HEADLESS_CONTROL`):
+  JSON lines. Commands are `outputs`, `windows`, `pointer`, `pointer_motion`, `pointer_button`,
+  `pointer_axis`, `key` (evdev codes), `screenshot` (renders synchronously to a PNG) and
+  `sync`. The module docs describe the exact protocol. Extend it when a test needs to observe
+  or drive something new, rather than sleeping or guessing.
+- **`test-client`** (`test-harness/src/bin/test-client.rs`): a solid-colour xdg_toplevel. It
+  reports `configure`, `ready`, `enter`/`leave` (output names), `preferred_buffer_scale`,
+  pointer and keyboard events as JSON lines, and accepts `move`, `set_color`, `sync` and
+  `quit` on stdin.
+- **Library** (`test-harness/src/lib.rs`):
+  - `Compositor::start(Options)` gives every compositor its own runtime, config and state dirs
+    under `$XDG_RUNTIME_DIR/cosmic-comp-test/`, disables the session bus and runs
+    `--no-xwayland`, so the host session is never touched.
+  - `Options::config(component, key, ron)` seeds cosmic-config entries, e.g. workspace mode.
+  - Helpers: `spawn_client`, `windows`/`wait_window`, `drag`/`drag_window_to` (real title-bar
+    drags), `screenshot` → `Image::coverage` for pixel checks, and `Client::entered_outputs`
+    (syncs first).
+- Window geometry from `windows` includes the 36px server-side title bar
+  (`HEADER_HEIGHT`). `WindowInfo::content()` is the client area.
+- Failing tests keep their run directory (log, screenshots, config) and print its path. Set
+  `COSMIC_TEST_KEEP=1` to keep passing ones too. View screenshots to debug rendering.
+- Unix socket paths are limited to 108 bytes, so never put compositor runtime dirs under a
+  long path (e.g. a scratchpad or `target/`).
+
+Writing tests:
+
+- Assert on what clients and users observe (pixels, `wl_surface.enter/leave`, pointer
+  events), plus `windows` for layout. Avoid asserting on implementation details.
+- Synchronise instead of sleeping: control requests are handled in order, `Client::sync`
+  round-trips, and `wait_window`/`wait_event` poll with a 10s timeout.
+- Keep `cargo test` green at every commit. A feature's failing tests land together with
+  its implementation.
+- Check new tests for flakiness by running them repeatedly, e.g. 20 times in a loop.
 
 ## Running and manual testing
 
-- **Backend selection:** `COSMIC_BACKEND=kms|x11|winit`. If unset and `DISPLAY` or
+- **Backend selection:** `COSMIC_BACKEND=kms|x11|winit|headless`. If unset and `DISPLAY` or
   `WAYLAND_DISPLAY` is set, it starts nested (x11, falling back to winit); otherwise it uses KMS.
 - **Nested:** from inside a running desktop session, `cargo run` opens the compositor in a
   window. Run clients inside it by pointing them at the nested socket (`WAYLAND_DISPLAY`,
@@ -140,7 +189,8 @@ There are very few unit tests (`src/backend/render/cursor.rs`, `src/backend/kms/
 
 ```
 src/
-  backend/        kms/ (DRM/GBM, per-surface render threads), x11.rs, winit.rs, render/ (elements, shaders, cursor)
+  backend/        kms/ (DRM/GBM, per-surface render threads), x11.rs, winit.rs, headless{.rs,/control.rs}
+                  (fork-only, tests), render/ (elements, shaders, cursor)
   shell/          Shell + Workspaces (mod.rs), workspace.rs, layout/{floating,tiling}, element/ (window, stack, surface),
                   grabs/ (move, resize, menu), focus/, zoom.rs
   input/          libinput/seat input handling, hit-testing (surface_under / element_under), actions, gestures
@@ -151,6 +201,8 @@ cosmic-comp-config/  serde config types shared with cosmic-settings (workspace m
 data/                keybindings.ron, tiling-exceptions.ron, session/systemd files
 resources/i18n/      Fluent translations (managed by Weblate; only edit `en/`)
 debian/              packaging (vendored build via `just build-vendored`)
+test-harness/        fork-only integration tests (own Cargo.lock): test-client, harness lib, tests/
+scripts/             fork-only: nested.sh (manual multi-output), test.sh (automated tests)
 ```
 
 Notes relevant to multi-output work:
