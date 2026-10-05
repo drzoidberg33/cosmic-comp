@@ -22,7 +22,7 @@ use smithay::{
         },
         drm::{DrmDeviceFd, DrmNode, NodeType},
         egl::{EGLContext, EGLDevice, EGLDisplay},
-        input::{Event, InputEvent},
+        input::{AbsolutePositionEvent, Event, InputEvent},
         renderer::{
             Bind, ImportDma,
             damage::{OutputDamageTracker, RenderOutputResult},
@@ -39,7 +39,7 @@ use smithay::{
         wayland_protocols::wp::presentation_time::server::wp_presentation_feedback,
         wayland_server::DisplayHandle,
     },
-    utils::{DeviceFd, Logical, Size, Transform},
+    utils::{DeviceFd, Logical, Point, Rectangle, Size, Transform},
     wayland::{dmabuf::DmabufFeedbackBuilder, presentation::Refresh},
 };
 use std::{borrow::BorrowMut, cell::RefCell, os::unix::io::OwnedFd, time::Duration};
@@ -576,21 +576,62 @@ impl State {
         if let InputEvent::PointerMotionAbsolute { event } = &event
             && let Some(window) = event.window()
         {
-            let output = self
+            let (output, window_size) = self
                 .backend
                 .x11()
                 .surfaces
                 .iter()
                 .find(|surface| &surface.window == window.as_ref())
-                .map(|surface| surface.output.clone())
+                .map(|surface| (surface.output.clone(), surface.window.size()))
                 .unwrap();
 
             let device = event.device();
-            for seat in self.common.shell.read().seats.iter() {
-                let devices = seat.user_data().get::<Devices>().unwrap();
-                if devices.has_device(&device, &crate::input::InputBackendId::Normal) {
-                    seat.set_active_output(&output);
-                    break;
+            let seat = self
+                .common
+                .shell
+                .read()
+                .seats
+                .iter()
+                .find(|seat| {
+                    let devices = seat.user_data().get::<Devices>().unwrap();
+                    devices.has_device(&device, &crate::input::InputBackendId::Normal)
+                })
+                .cloned();
+            if let Some(seat) = seat {
+                seat.set_active_output(&output);
+
+                // While a button is held, X11 keeps reporting motion relative to the window the
+                // press happened in, also past its edges. smithay clamps negative coordinates to
+                // 0 (but not ones past the far edges), which pinned drags at the top and left
+                // edges. Map the raw coordinates to a global position and use the output there.
+                let outputs = self
+                    .common
+                    .shell
+                    .read()
+                    .outputs()
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let geometries = outputs
+                    .iter()
+                    .map(|o| o.geometry().to_f64())
+                    .collect::<Vec<_>>();
+                let (target, position) = nested_pointer_target(
+                    output.geometry().to_f64(),
+                    window_size,
+                    (event.x(), event.y()),
+                    &geometries,
+                );
+                let inside_window = (0.0..f64::from(window_size.w)).contains(&event.x())
+                    && (0.0..f64::from(window_size.h)).contains(&event.y());
+                if !inside_window {
+                    let target = target.map_or_else(|| output.clone(), |i| outputs[i].clone());
+                    self.common.idle_notifier_state.notify_activity(&seat);
+                    render::cursor::notify_cursor_activity(self, &seat);
+                    self.pointer_motion_absolute(&seat, target, position, event.time());
+                    for output in self.common.shell.read().outputs() {
+                        self.backend.x11().schedule_render(output);
+                    }
+                    return;
                 }
             }
         };
@@ -600,5 +641,110 @@ impl State {
         for output in self.common.shell.read().outputs() {
             self.backend.x11().schedule_render(output);
         }
+    }
+}
+
+/// Maps pointer coordinates relative to the X11 window showing an output at `source` (global
+/// logical geometry) to a global position, and returns the index of the output in `outputs`
+/// containing it. The coordinates may lie outside the window during an implicit grab. If no
+/// output contains the position, it's clamped to `source` and no index is returned.
+fn nested_pointer_target(
+    source: Rectangle<f64, Global>,
+    window_size: Size<u16, Logical>,
+    (x, y): (f64, f64),
+    outputs: &[Rectangle<f64, Global>],
+) -> (Option<usize>, Point<f64, Global>) {
+    let position = source.loc
+        + Point::<f64, Global>::from((
+            x * source.size.w / f64::from(window_size.w),
+            y * source.size.h / f64::from(window_size.h),
+        ));
+    match outputs.iter().position(|o| o.contains(position)) {
+        Some(index) => (Some(index), position),
+        None => (
+            None,
+            Point::from((
+                position
+                    .x
+                    .clamp(source.loc.x, source.loc.x + source.size.w - 1.0),
+                position
+                    .y
+                    .clamp(source.loc.y, source.loc.y + source.size.h - 1.0),
+            )),
+        ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rect(x: f64, y: f64, w: f64, h: f64) -> Rectangle<f64, Global> {
+        Rectangle::new((x, y).into(), (w, h).into())
+    }
+
+    /// Two 960x540 outputs at the bottom, one centred above them.
+    fn pyramid() -> Vec<Rectangle<f64, Global>> {
+        vec![
+            rect(0.0, 540.0, 960.0, 540.0),
+            rect(960.0, 540.0, 960.0, 540.0),
+            rect(480.0, 0.0, 960.0, 540.0),
+        ]
+    }
+
+    #[test]
+    fn maps_coordinates_past_the_window_to_neighbouring_outputs() {
+        let outputs = pyramid();
+        let size = Size::from((960, 540));
+        // Inside the window.
+        assert_eq!(
+            nested_pointer_target(outputs[0], size, (100.0, 100.0), &outputs),
+            (Some(0), (100.0, 640.0).into())
+        );
+        // Above the bottom-left window, onto the top output (used to be clamped to y = 0).
+        assert_eq!(
+            nested_pointer_target(outputs[0], size, (600.0, -40.0), &outputs),
+            (Some(2), (600.0, 500.0).into())
+        );
+        // Left of the bottom-right window, onto the bottom-left output.
+        assert_eq!(
+            nested_pointer_target(outputs[1], size, (-60.0, 10.0), &outputs),
+            (Some(0), (900.0, 550.0).into())
+        );
+        // Right of the bottom-left window, onto the bottom-right output.
+        assert_eq!(
+            nested_pointer_target(outputs[0], size, (1000.0, 10.0), &outputs),
+            (Some(1), (1000.0, 550.0).into())
+        );
+    }
+
+    #[test]
+    fn clamps_to_the_window_where_there_is_no_output() {
+        let outputs = pyramid();
+        let size = Size::from((960, 540));
+        // Above the left part of the bottom-left output there is no output.
+        assert_eq!(
+            nested_pointer_target(outputs[0], size, (100.0, -40.0), &outputs),
+            (None, (100.0, 540.0).into())
+        );
+        assert_eq!(
+            nested_pointer_target(outputs[0], size, (-50.0, 2000.0), &outputs),
+            (None, (0.0, 1079.0).into())
+        );
+    }
+
+    #[test]
+    fn scales_window_pixels_to_logical_coordinates() {
+        // A 2x output: the 960x540 window shows 480x270 logical pixels.
+        let outputs = vec![rect(0.0, 270.0, 480.0, 270.0), rect(0.0, 0.0, 480.0, 270.0)];
+        assert_eq!(
+            nested_pointer_target(
+                outputs[0],
+                Size::from((960, 540)),
+                (200.0, -100.0),
+                &outputs
+            ),
+            (Some(1), (100.0, 220.0).into())
+        );
     }
 }

@@ -212,6 +212,60 @@ impl ModifiersShortcutQueue {
 }
 
 impl State {
+    /// Moves `seat`'s pointer to the global `position` on `output`, i.e. the part of absolute
+    /// motion handling after the position is known. Backends that compute global positions
+    /// themselves (the nested X11 backend, see `process_x11_event`) call this directly.
+    pub fn pointer_motion_absolute(
+        &mut self,
+        seat: &Seat<State>,
+        output: Output,
+        position: Point<f64, Global>,
+        time: InputTime,
+    ) {
+        let serial = SERIAL_COUNTER.next_serial();
+        let under = State::surface_under(position, &output, &self.common.shell.write())
+            .map(|(target, pos)| (target, pos.as_logical()));
+
+        let ptr = seat.get_pointer().unwrap();
+        ptr.motion(
+            self,
+            under,
+            &PointerMotionEvent {
+                location: position.as_logical(),
+                serial,
+                time,
+            },
+        );
+        ptr.frame(self);
+
+        let mut shell = self.common.shell.write();
+        // Keep the seat's active output following the pointer. Click-to-
+        // focus (PointerButton) resolves its target via
+        // `seat.active_output()`
+        let previous_output = seat.active_output();
+        if previous_output != output {
+            for session in cursor_sessions_for_output(&shell, &previous_output) {
+                session.set_cursor_pos(None);
+            }
+            seat.set_active_output(&output);
+        }
+
+        shell.update_pointer_position(position.to_local(&output), &output);
+        shell.update_focal_point(
+            seat,
+            position,
+            self.common.config.cosmic_conf.accessibility_zoom.view_moves,
+        );
+
+        update_output_image_copy_cursor_position(
+            &shell,
+            &self.common.clock,
+            &output,
+            seat,
+            position,
+        );
+    }
+
     #[profiling::function]
     pub fn process_input_event<B: InputBackend>(
         &mut self,
@@ -751,48 +805,7 @@ impl State {
                             .as_global();
                         (output, position)
                     };
-                    let serial = SERIAL_COUNTER.next_serial();
-                    let under = State::surface_under(position, &output, &self.common.shell.write())
-                        .map(|(target, pos)| (target, pos.as_logical()));
-
-                    let ptr = seat.get_pointer().unwrap();
-                    ptr.motion(
-                        self,
-                        under,
-                        &PointerMotionEvent {
-                            location: position.as_logical(),
-                            serial,
-                            time: event.time(),
-                        },
-                    );
-                    ptr.frame(self);
-
-                    let mut shell = self.common.shell.write();
-                    // Keep the seat's active output following the pointer. Click-to-
-                    // focus (PointerButton) resolves its target via
-                    // `seat.active_output()`
-                    let previous_output = seat.active_output();
-                    if previous_output != output {
-                        for session in cursor_sessions_for_output(&shell, &previous_output) {
-                            session.set_cursor_pos(None);
-                        }
-                        seat.set_active_output(&output);
-                    }
-
-                    shell.update_pointer_position(position.to_local(&output), &output);
-                    shell.update_focal_point(
-                        &seat,
-                        position,
-                        self.common.config.cosmic_conf.accessibility_zoom.view_moves,
-                    );
-
-                    update_output_image_copy_cursor_position(
-                        &shell,
-                        &self.common.clock,
-                        &output,
-                        &seat,
-                        position,
-                    );
+                    self.pointer_motion_absolute(&seat, output, position, event.time());
                 }
             }
             InputEvent::PointerButton { event, .. } => {

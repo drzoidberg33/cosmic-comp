@@ -249,6 +249,15 @@ regression.
   enters. Arrange the host windows like the layout, or drags across seams will jump. Check
   the nested layout with `WAYLAND_DISPLAY=wayland-N cosmic-randr list`. The winit backend is
   still single-output.
+- **Nested drags and X11 implicit grabs:** while a button is held, the host X server keeps
+  sending motion to the window where the press happened, with coordinates past its edges.
+  smithay's X11 `x_transformed`/`y_transformed` clamp negative values to 0 but not values
+  past the far edge. So drags used to pass the right and bottom edges but stick at the top
+  and left ones, sitting in the maximize/tile snap zone. `State::process_x11_event` maps
+  the raw `x()`/`y()` to a global position (`nested_pointer_target`, unit-tested) and calls
+  `State::pointer_motion_absolute`, the shared tail of absolute motion handling. The
+  headless backend has no implicit grab, so this is only covered by those unit tests and
+  manual testing.
 - **`scripts/nested.sh [client args...]`** builds (`PROFILE`, default `dev-opt`) and runs the
   nested compositor with three 960x540 outputs: two at the bottom and one centred above
   (`960x540+0+540,960x540+960+540,960x540+480+0`, override with `COSMIC_X11_OUTPUTS`). It
