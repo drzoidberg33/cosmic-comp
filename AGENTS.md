@@ -240,14 +240,21 @@ regression.
   With the `systemd` feature, logs also go to the journal
   (`journalctl --user -b -t cosmic-comp` or similar).
 - **Multiple nested outputs (fork-only):** the X11 backend opens one window per output listed
-  in `COSMIC_X11_OUTPUTS`, given as a count (`2`) or sizes (`1280x720,1920x1080`). Outputs
-  are laid out left to right by name (`X11-0`, `X11-1`, ...) by the fallback layout in
-  `Config::read_outputs`. Moving the host pointer from one window to the next crosses into
-  the next output. The winit backend is still single-output.
+  in `COSMIC_X11_OUTPUTS`, given as a count (`2`) or `WxH[@scale][+X+Y]` entries. That's the
+  same syntax and parser as the headless backend (`src/backend/output_spec.rs`). Outputs
+  without positions are laid out left to right by name (`X11-0`, `X11-1`, ...) by the
+  fallback layout in `Config::read_outputs`. Positions are applied afterwards through the
+  output configuration path (`output_spec::apply_positions`). Each output is its own host
+  window, placed freely by the host, and the host pointer crosses into whichever window it
+  enters. Arrange the host windows like the layout, or drags across seams will jump. Check
+  the nested layout with `WAYLAND_DISPLAY=wayland-N cosmic-randr list`. The winit backend is
+  still single-output.
 - **`scripts/nested.sh [client args...]`** builds (`PROFILE`, default `dev-opt`) and runs the
-  nested compositor with two 1280x720 outputs, `RUST_LOG=info`, and an
-  isolated `XDG_STATE_HOME`. That keeps nested layouts out of the real
-  `~/.local/state/cosmic-comp/outputs.ron`. It waits for the socket, then launches the client
+  nested compositor with three 960x540 outputs: two at the bottom and one centred above
+  (`960x540+0+540,960x540+960+540,960x540+480+0`, override with `COSMIC_X11_OUTPUTS`). It
+  uses `RUST_LOG=info` and an isolated `XDG_STATE_HOME`. That keeps nested layouts out of
+  the real `~/.local/state/cosmic-comp/outputs.ron`. It waits for the socket, then launches
+  the client
   (default `cosmic-term`) against it. The log goes to the console and to
   `$XDG_RUNTIME_DIR/cosmic-comp-nested/cosmic-comp.log`. Start more clients with the printed
   socket: `WAYLAND_DISPLAY=wayland-N cosmic-edit`. Ctrl+C or closing the windows stops it.
@@ -274,7 +281,7 @@ regression.
 ```
 src/
   backend/        kms/ (DRM/GBM, per-surface render threads), x11.rs, winit.rs, headless{.rs,/control.rs}
-                  (fork-only, tests), render/ (elements, shaders, cursor)
+                  and output_spec.rs (fork-only, tests), render/ (elements, shaders, cursor)
   shell/          Shell + Workspaces (mod.rs), workspace.rs, layout/{floating,tiling}, element/ (window, stack, surface),
                   grabs/ (move, resize, menu), focus/, zoom.rs
   input/          libinput/seat input handling, hit-testing (surface_under / element_under), actions, gestures

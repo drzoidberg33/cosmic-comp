@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! Fork-only: `WxH[@scale][+X+Y]` output specs for the headless backend, so tests can use
-//! arbitrary output arrangements.
+//! Fork-only: `WxH[@scale][+X+Y]` output specs for the headless and nested X11 backends, so
+//! tests and manual testing can use arbitrary output arrangements.
 
 use crate::{state::State, utils::prelude::*};
 use anyhow::{Context, Result, bail};

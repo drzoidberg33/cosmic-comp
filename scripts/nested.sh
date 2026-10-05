@@ -15,7 +15,19 @@
 #   exits (COSMIC apps fork into the background and exit immediately).
 #
 # Environment:
-#   COSMIC_X11_OUTPUTS  number of outputs or comma separated sizes (default 1280x720,1280x720)
+#   COSMIC_X11_OUTPUTS  number of outputs, or comma separated `WxH[@scale][+X+Y]` entries.
+#                       Defaults to three 960x540 outputs, two at the bottom and one centred
+#                       above them:
+#
+#                                 +--------+
+#                                 |   2    |
+#                             +---+----+---+----+
+#                             |   0    |   1    |
+#                             +--------+--------+
+#
+#                       Each output is its own host window and the host places them freely.
+#                       Arrange the windows like the layout so moving the pointer between them
+#                       matches the geometry the nested compositor uses.
 #   PROFILE             cargo profile to build and run (default dev-opt)
 #   RUST_LOG            log filter (default info). `debug!`/`trace!` are compiled out of
 #                       release-based profiles (fastdebug, release).
@@ -37,7 +49,7 @@ log="$state_dir/cosmic-comp.log"
 mkdir -p "$state_dir/state"
 
 export COSMIC_BACKEND=x11
-export COSMIC_X11_OUTPUTS="${COSMIC_X11_OUTPUTS:-1280x720,1280x720}"
+export COSMIC_X11_OUTPUTS="${COSMIC_X11_OUTPUTS:-960x540+0+540,960x540+960+540,960x540+480+0}"
 export RUST_LOG="${RUST_LOG:-info}"
 # Keep the nested output layout out of the real ~/.local/state/cosmic-comp/outputs.ron.
 export XDG_STATE_HOME="$state_dir/state"

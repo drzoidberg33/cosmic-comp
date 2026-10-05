@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use crate::{
-    backend::render,
+    backend::{
+        output_spec::{self, OutputSpec, parse_output_specs},
+        render,
+    },
     config::ScreenFilter,
     shell::{Devices, SeatExt},
     state::{BackendData, Common},
@@ -64,13 +67,18 @@ impl X11State {
     pub fn add_window(
         &mut self,
         handle: LoopHandle<'_, State>,
-        size: Option<Size<u16, Logical>>,
+        spec: Option<OutputSpec>,
     ) -> Result<Output> {
         let title = format!("COSMIC (X11-{})", self.surfaces.len());
         let mut builder = WindowBuilder::new().title(&title);
-        if let Some(size) = size {
-            builder = builder.size(size);
+        if let Some(spec) = spec {
+            let size = (
+                u16::try_from(spec.size.0).context("Window too wide")?,
+                u16::try_from(spec.size.1).context("Window too high")?,
+            );
+            builder = builder.size(Size::<u16, Logical>::from(size));
         }
+        let scale = spec.map_or(1.0, |spec| spec.scale);
         let window = builder
             .build(&self.handle)
             .with_context(|| "Failed to create window")?;
@@ -117,12 +125,13 @@ impl X11State {
         output.change_current_state(
             Some(mode),
             Some(Transform::Normal),
-            Some(Scale::Integer(1)),
+            Some(Scale::Fractional(scale)),
             Some((0, 0).into()),
         );
         output.user_data().insert_if_missing(|| {
             RefCell::new(OutputConfig {
                 mode: ((size.w as i32, size.h as i32), None),
+                scale,
                 ..Default::default()
             })
         });
@@ -335,33 +344,23 @@ fn try_gbm_allocator(fd: OwnedFd) -> Option<Allocator> {
 }
 
 /// Parses `COSMIC_X11_OUTPUTS` to open one window (and thus one output) per entry, for testing
-/// multi-output behaviour nested. Accepts a count (`2`) or a comma separated list of sizes
-/// (`1280x720,1920x1080`). Defaults to a single window of the default size.
-fn window_sizes_from_env() -> Vec<Option<Size<u16, Logical>>> {
+/// multi-output behaviour nested. Accepts a count (`2`) or `WxH[@scale][+X+Y]` entries (see
+/// [`output_spec`]), e.g. `960x540+0+540,960x540+960+540,960x540+480+0`. Defaults to a single
+/// window of the default size.
+fn output_specs_from_env() -> Result<Vec<Option<OutputSpec>>> {
     let Ok(value) = std::env::var("COSMIC_X11_OUTPUTS") else {
-        return vec![None];
+        return Ok(vec![None]);
     };
 
     if let Ok(count) = value.trim().parse::<usize>() {
-        return vec![None; count.max(1)];
+        return Ok(vec![None; count.max(1)]);
     }
 
-    let sizes = value
-        .split(',')
-        .filter_map(|entry| {
-            let size = entry
-                .trim()
-                .split_once('x')
-                .and_then(|(w, h)| Some((w.parse::<u16>().ok()?, h.parse::<u16>().ok()?)))
-                .filter(|(w, h)| *w > 0 && *h > 0);
-            if size.is_none() {
-                warn!(?entry, "Ignoring invalid COSMIC_X11_OUTPUTS entry.");
-            }
-            size.map(|size| Some(Size::from(size)))
-        })
-        .collect::<Vec<_>>();
-
-    if sizes.is_empty() { vec![None] } else { sizes }
+    Ok(parse_output_specs(&value)
+        .context("Invalid COSMIC_X11_OUTPUTS")?
+        .into_iter()
+        .map(Some)
+        .collect())
 }
 
 pub fn init_backend(
@@ -402,13 +401,14 @@ pub fn init_backend(
         surfaces: Vec::new(),
     });
 
-    let outputs = window_sizes_from_env()
-        .into_iter()
-        .map(|size| {
+    let specs = output_specs_from_env()?;
+    let outputs = specs
+        .iter()
+        .map(|spec| {
             state
                 .backend
                 .x11()
-                .add_window(event_loop.handle(), size)
+                .add_window(event_loop.handle(), *spec)
                 .with_context(|| "Failed to create wl_output")
         })
         .collect::<Result<Vec<_>>>()?;
@@ -432,6 +432,12 @@ pub fn init_backend(
         ) {
             error!("Unrecoverable output configuration error: {}", err);
         }
+        let positions = outputs
+            .iter()
+            .cloned()
+            .zip(specs.iter().map(|spec| spec.and_then(|spec| spec.position)))
+            .collect::<Vec<_>>();
+        output_spec::apply_positions(state, &positions)?;
         state.common.refresh();
     }
 
