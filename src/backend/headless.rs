@@ -21,6 +21,7 @@ use crate::{
 };
 use anyhow::{Context, Result, anyhow, bail};
 use cosmic_comp_config::output::comp::OutputConfig;
+use smithay::reexports::glow::HasContext;
 use smithay::{
     backend::{
         allocator::Fourcc,
@@ -52,7 +53,12 @@ use smithay::{
     utils::{Buffer as BufferCoords, Point, Rectangle, Size, Transform},
     wayland::{dmabuf::DmabufFeedbackBuilder, presentation::Refresh},
 };
-use std::{borrow::BorrowMut, cell::RefCell, path::Path, time::Duration};
+use std::{
+    borrow::BorrowMut,
+    cell::RefCell,
+    path::Path,
+    time::{Duration, Instant},
+};
 use tracing::{error, info, warn};
 
 pub mod control;
@@ -263,6 +269,52 @@ impl HeadlessState {
         }
 
         Ok(())
+    }
+
+    /// Renders `output` `frames` times (full redraws, no frame callbacks) and returns the time
+    /// spent building and submitting each frame (`cpu`) and until the GPU finished it (`total`).
+    pub fn bench_render(
+        &mut self,
+        output: &Output,
+        common: &mut Common,
+        frames: usize,
+    ) -> Result<(Vec<Duration>, Vec<Duration>)> {
+        let surface = self
+            .surfaces
+            .iter_mut()
+            .find(|s| s.output == *output)
+            .with_context(|| format!("Unknown output {}", output.name()))?;
+        let renderer = &mut self.renderer;
+
+        let mut cpu = Vec::with_capacity(frames);
+        let mut total = Vec::with_capacity(frames);
+        for _ in 0..frames {
+            let start = Instant::now();
+            let mut fb = renderer
+                .bind(&mut surface.buffer)
+                .context("Failed to bind offscreen buffer")?;
+            render::render_output(
+                None,
+                renderer,
+                &mut fb,
+                &mut surface.damage_tracker,
+                0,
+                &common.shell,
+                common.clock.now(),
+                output,
+                CursorMode::None,
+                &mut surface.screen_filter_state,
+                &common.event_loop_handle,
+            )
+            .map_err(|err| anyhow!("Rendering failed: {err}"))?;
+            std::mem::drop(fb);
+            cpu.push(start.elapsed());
+            renderer
+                .with_context(|gl| unsafe { gl.finish() })
+                .context("glFinish failed")?;
+            total.push(start.elapsed());
+        }
+        Ok((cpu, total))
     }
 
     pub fn all_outputs(&self) -> Vec<Output> {

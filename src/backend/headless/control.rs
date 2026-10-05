@@ -10,6 +10,7 @@
 //! - `{"cmd":"windows"}` → `windows: [{title, app_id, x, y, width, height, output, workspace,
 //!   active_workspace, floating, maximized}]`
 //! - `{"cmd":"pointer"}` → `x, y` of the pointer
+//! - `{"cmd":"focus"}` → `pointer`, `keyboard`: debug descriptions of the current focus targets
 //! - `{"cmd":"pointer_motion","x":F,"y":F}`
 //! - `{"cmd":"pointer_button","button":"left"|"right"|"middle"|CODE,"pressed":B}`
 //! - `{"cmd":"pointer_axis","horizontal":F,"vertical":F}`
@@ -17,20 +18,33 @@
 //! - `{"cmd":"screenshot","output":"HEADLESS-0","path":"/abs/file.png"}` renders the output
 //!   synchronously and writes it as an RGBA PNG.
 //! - `{"cmd":"sync"}` → answered once all earlier requests have been handled.
+//!
+//! Benchmarks (timings in microseconds as `{mean, median, p95, min, max, samples}`):
+//!
+//! - `{"cmd":"bench_render","output":NAME,"frames":N,"warmup":N}` → `cpu`, `total`: full
+//!   redraws of one output. `cpu` stops once the frame is submitted, `total` after `glFinish`.
+//! - `{"cmd":"bench_input","points":[[X,Y],...],"iterations":N}` → `surface_under`,
+//!   `element_under`: per lookup, cycling through `points`.
+//! - `{"cmd":"bench_refresh","iterations":N}` → `refresh`: per `Common::refresh` call.
 
 use super::HeadlessState;
 use crate::{state::BackendData, utils::prelude::*};
 use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use smithay::reexports::calloop::{
-    Interest, LoopHandle, Mode, PostAction,
-    generic::{Generic, NoIoDrop},
+use smithay::{
+    output::Output,
+    reexports::calloop::{
+        Interest, LoopHandle, Mode, PostAction,
+        generic::{Generic, NoIoDrop},
+    },
+    utils::Point,
 };
 use std::{
     io::{ErrorKind, Read, Write},
     os::unix::net::{UnixListener, UnixStream},
     path::{Path, PathBuf},
+    time::{Duration, Instant},
 };
 use tracing::warn;
 
@@ -44,6 +58,7 @@ enum Command {
     Outputs,
     Windows,
     Pointer,
+    Focus,
     PointerMotion {
         x: f64,
         y: f64,
@@ -67,6 +82,19 @@ enum Command {
         path: PathBuf,
     },
     Sync,
+    BenchRender {
+        output: String,
+        frames: usize,
+        #[serde(default)]
+        warmup: usize,
+    },
+    BenchInput {
+        points: Vec<(f64, f64)>,
+        iterations: usize,
+    },
+    BenchRefresh {
+        iterations: usize,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -266,6 +294,19 @@ fn execute(command: Command, state: &mut State) -> Result<Value> {
             HeadlessState::pointer_motion(state, (x, y).into())?;
             Ok(json!({}))
         }
+        Command::Focus => {
+            let shell = state.common.shell.read();
+            let seat = shell.seats.last_active();
+            let pointer = seat
+                .get_pointer()
+                .and_then(|p| p.current_focus())
+                .map(|f| format!("{f:?}"));
+            let keyboard = seat
+                .get_keyboard()
+                .and_then(|k| k.current_focus())
+                .map(|f| format!("{f:?}"));
+            Ok(json!({ "pointer": pointer, "keyboard": keyboard }))
+        }
         Command::PointerButton { button, pressed } => {
             HeadlessState::pointer_button(state, button.code()?, pressed);
             Ok(json!({}))
@@ -297,5 +338,88 @@ fn execute(command: Command, state: &mut State) -> Result<Value> {
             Ok(json!({ "path": path }))
         }
         Command::Sync => Ok(json!({})),
+        Command::BenchRender {
+            output,
+            frames,
+            warmup,
+        } => {
+            let output = find_output(state, &output)?;
+            let BackendData::Headless(headless) = &mut state.backend else {
+                unreachable!("control socket only exists on the headless backend");
+            };
+            headless.bench_render(&output, &mut state.common, warmup)?;
+            let (cpu, total) = headless.bench_render(&output, &mut state.common, frames)?;
+            Ok(json!({ "cpu": stats(cpu), "total": stats(total) }))
+        }
+        Command::BenchInput { points, iterations } => {
+            let shell = state.common.shell.read();
+            let seat = shell.seats.last_active().clone();
+            let points = points
+                .into_iter()
+                .map(|(x, y)| {
+                    let position = Point::<f64, Global>::from((x, y));
+                    shell
+                        .outputs()
+                        .find(|o| o.geometry().to_f64().contains(position))
+                        .cloned()
+                        .map(|output| (position, output))
+                        .with_context(|| format!("No output at {position:?}"))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            anyhow::ensure!(!points.is_empty(), "No points given");
+
+            let mut surface_under = Vec::with_capacity(iterations);
+            let mut element_under = Vec::with_capacity(iterations);
+            for (position, output) in points.iter().cycle().take(iterations) {
+                let start = Instant::now();
+                std::hint::black_box(State::surface_under(*position, output, &shell));
+                surface_under.push(start.elapsed());
+                let start = Instant::now();
+                std::hint::black_box(State::element_under(*position, output, &shell, &seat));
+                element_under.push(start.elapsed());
+            }
+            Ok(json!({
+                "surface_under": stats(surface_under),
+                "element_under": stats(element_under),
+            }))
+        }
+        Command::BenchRefresh { iterations } => {
+            let mut refresh = Vec::with_capacity(iterations);
+            for _ in 0..iterations {
+                let start = Instant::now();
+                state.common.refresh();
+                refresh.push(start.elapsed());
+            }
+            Ok(json!({ "refresh": stats(refresh) }))
+        }
     }
+}
+
+fn find_output(state: &State, name: &str) -> Result<Output> {
+    state
+        .common
+        .shell
+        .read()
+        .outputs()
+        .find(|o| o.name() == name)
+        .cloned()
+        .with_context(|| format!("Unknown output `{name}`"))
+}
+
+fn stats(mut samples: Vec<Duration>) -> Value {
+    if samples.is_empty() {
+        return json!({ "samples": 0 });
+    }
+    samples.sort_unstable();
+    let micros = |d: Duration| d.as_secs_f64() * 1_000_000.0;
+    let n = samples.len();
+    let mean = samples.iter().map(|d| micros(*d)).sum::<f64>() / n as f64;
+    json!({
+        "mean": mean,
+        "median": micros(samples[n / 2]),
+        "p95": micros(samples[(n * 95 / 100).min(n - 1)]),
+        "min": micros(samples[0]),
+        "max": micros(samples[n - 1]),
+        "samples": n,
+    })
 }
