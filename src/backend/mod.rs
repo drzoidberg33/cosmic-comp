@@ -13,6 +13,7 @@ pub mod render;
 
 pub mod headless;
 pub mod kms;
+pub mod output_spec;
 pub mod winit;
 pub mod x11;
 // TODO

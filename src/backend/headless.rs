@@ -5,21 +5,25 @@
 //! Renders virtual outputs offscreen and takes input from a control socket instead of real
 //! devices, so the compositor can be driven by tests without showing anything on screen.
 //!
-//! - `COSMIC_HEADLESS_OUTPUTS`: comma separated `WxH[@scale]` entries, one per output
-//!   (default `1280x720`). Outputs are named `HEADLESS-0`, `HEADLESS-1`, ...
+//! - `COSMIC_HEADLESS_OUTPUTS`: comma separated `WxH[@scale][+X+Y]` entries, one per output
+//!   (default `1280x720`), with optional global logical positions (outputs without one are laid
+//!   out left to right). Outputs are named `HEADLESS-0`, `HEADLESS-1`, ...
 //! - `COSMIC_HEADLESS_RENDER_NODE`: render node to use (e.g. `/dev/dri/renderD128`). Defaults to
 //!   the first EGL device with a render node, falling back to a software (llvmpipe) device.
 //! - `COSMIC_HEADLESS_SOFTWARE=1`: force the software device.
 //! - `COSMIC_HEADLESS_CONTROL`: path of the control socket, see [`control`].
 
 use crate::{
-    backend::render::{self, CursorMode, ScreenFilterStorage, init_shaders},
+    backend::{
+        output_spec::{self, OutputSpec, parse_output_specs},
+        render::{self, CursorMode, ScreenFilterStorage, init_shaders},
+    },
     config::ScreenFilter,
     state::{BackendData, Common},
     utils::prelude::*,
     wayland::protocols::drm::WlDrmState,
 };
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow};
 use cosmic_comp_config::output::comp::OutputConfig;
 use smithay::reexports::glow::HasContext;
 use smithay::{
@@ -81,44 +85,6 @@ struct Surface {
     damage_tracker: OutputDamageTracker,
     screen_filter_state: ScreenFilterStorage,
     render_pending: bool,
-}
-
-/// One `WxH[@scale]` entry of `COSMIC_HEADLESS_OUTPUTS`.
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct OutputSpec {
-    size: (i32, i32),
-    scale: f64,
-}
-
-fn parse_output_specs(value: &str) -> Result<Vec<OutputSpec>> {
-    value
-        .split(',')
-        .map(|entry| {
-            let entry = entry.trim();
-            let (size, scale) = match entry.split_once('@') {
-                Some((size, scale)) => (
-                    size,
-                    scale
-                        .parse::<f64>()
-                        .with_context(|| format!("Invalid scale in `{entry}`"))?,
-                ),
-                None => (entry, 1.0),
-            };
-            let (w, h) = size
-                .split_once('x')
-                .with_context(|| format!("Expected `WxH[@scale]`, got `{entry}`"))?;
-            let size = (
-                w.parse::<i32>()
-                    .with_context(|| format!("Invalid width in `{entry}`"))?,
-                h.parse::<i32>()
-                    .with_context(|| format!("Invalid height in `{entry}`"))?,
-            );
-            if size.0 <= 0 || size.1 <= 0 || scale <= 0.0 {
-                bail!("Output size and scale must be positive in `{entry}`");
-            }
-            Ok(OutputSpec { size, scale })
-        })
-        .collect()
 }
 
 impl HeadlessState {
@@ -557,6 +523,7 @@ pub fn init_backend(
         Err(_) => vec![OutputSpec {
             size: (1280, 720),
             scale: 1.0,
+            position: None,
         }],
     };
 
@@ -583,6 +550,7 @@ pub fn init_backend(
         input_device_added: false,
     });
 
+    let positions = specs.iter().map(|spec| spec.position).collect::<Vec<_>>();
     let outputs = specs
         .into_iter()
         .map(|spec| state.backend.headless().add_output(spec))
@@ -606,6 +574,8 @@ pub fn init_backend(
     ) {
         error!("Unrecoverable output configuration error: {}", err);
     }
+    let positions = outputs.iter().cloned().zip(positions).collect::<Vec<_>>();
+    output_spec::apply_positions(state, &positions)?;
     for output in &outputs {
         layer_map_for_output(output).arrange();
     }
@@ -817,28 +787,3 @@ impl AbsolutePositionEvent<HeadlessInput> for HeadlessMotionEvent {
 }
 
 impl PointerMotionAbsoluteEvent<HeadlessInput> for HeadlessMotionEvent {}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parses_output_specs() {
-        assert_eq!(
-            parse_output_specs("1280x720, 1920x1080@1.5").unwrap(),
-            vec![
-                OutputSpec {
-                    size: (1280, 720),
-                    scale: 1.0
-                },
-                OutputSpec {
-                    size: (1920, 1080),
-                    scale: 1.5
-                },
-            ]
-        );
-        assert!(parse_output_specs("1280").is_err());
-        assert!(parse_output_specs("0x720").is_err());
-        assert!(parse_output_specs("1280x720@0").is_err());
-    }
-}
