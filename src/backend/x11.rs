@@ -36,7 +36,7 @@ use smithay::{
         wayland_protocols::wp::presentation_time::server::wp_presentation_feedback,
         wayland_server::DisplayHandle,
     },
-    utils::{DeviceFd, Transform},
+    utils::{DeviceFd, Logical, Size, Transform},
     wayland::{dmabuf::DmabufFeedbackBuilder, presentation::Refresh},
 };
 use std::{borrow::BorrowMut, cell::RefCell, os::unix::io::OwnedFd, time::Duration};
@@ -61,9 +61,17 @@ pub struct X11State {
 }
 
 impl X11State {
-    pub fn add_window(&mut self, handle: LoopHandle<'_, State>) -> Result<Output> {
-        let window = WindowBuilder::new()
-            .title("COSMIC")
+    pub fn add_window(
+        &mut self,
+        handle: LoopHandle<'_, State>,
+        size: Option<Size<u16, Logical>>,
+    ) -> Result<Output> {
+        let title = format!("COSMIC (X11-{})", self.surfaces.len());
+        let mut builder = WindowBuilder::new().title(&title);
+        if let Some(size) = size {
+            builder = builder.size(size);
+        }
+        let window = builder
             .build(&self.handle)
             .with_context(|| "Failed to create window")?;
         let fourcc = window.format();
@@ -171,26 +179,26 @@ impl X11State {
     }
 
     pub fn apply_config_for_outputs(&mut self, test_only: bool) -> Result<(), anyhow::Error> {
-        // TODO: if we ever have multiple winit outputs, don't juse use the first and don't ignore OutputState
+        // TODO: don't ignore OutputState
+        let mut result = Ok(());
+        for surface in &self.surfaces {
+            let size = surface.window.size();
+            let mut config = surface
+                .output
+                .user_data()
+                .get::<RefCell<OutputConfig>>()
+                .unwrap()
+                .borrow_mut();
 
-        let surface = self.surfaces.first().unwrap();
-        let size = surface.window.size();
-        let mut config = surface
-            .output
-            .user_data()
-            .get::<RefCell<OutputConfig>>()
-            .unwrap()
-            .borrow_mut();
-
-        // reset size
-        if config.mode.0 != (size.w as i32, size.h as i32) {
-            if !test_only {
-                config.mode = ((size.w as i32, size.h as i32), None);
+            // reset size
+            if config.mode.0 != (size.w as i32, size.h as i32) {
+                if !test_only {
+                    config.mode = ((size.w as i32, size.h as i32), None);
+                }
+                result = Err(anyhow::anyhow!("Cannot set window size"));
             }
-            Err(anyhow::anyhow!("Cannot set window size"))
-        } else {
-            Ok(())
         }
+        result
     }
 
     pub fn update_screen_filter(&mut self, screen_filter: &ScreenFilter) -> Result<()> {
@@ -326,6 +334,36 @@ fn try_gbm_allocator(fd: OwnedFd) -> Option<Allocator> {
     )))
 }
 
+/// Parses `COSMIC_X11_OUTPUTS` to open one window (and thus one output) per entry, for testing
+/// multi-output behaviour nested. Accepts a count (`2`) or a comma separated list of sizes
+/// (`1280x720,1920x1080`). Defaults to a single window of the default size.
+fn window_sizes_from_env() -> Vec<Option<Size<u16, Logical>>> {
+    let Ok(value) = std::env::var("COSMIC_X11_OUTPUTS") else {
+        return vec![None];
+    };
+
+    if let Ok(count) = value.trim().parse::<usize>() {
+        return vec![None; count.max(1)];
+    }
+
+    let sizes = value
+        .split(',')
+        .filter_map(|entry| {
+            let size = entry
+                .trim()
+                .split_once('x')
+                .and_then(|(w, h)| Some((w.parse::<u16>().ok()?, h.parse::<u16>().ok()?)))
+                .filter(|(w, h)| *w > 0 && *h > 0);
+            if size.is_none() {
+                warn!(?entry, "Ignoring invalid COSMIC_X11_OUTPUTS entry.");
+            }
+            size.map(|size| Some(Size::from(size)))
+        })
+        .collect::<Vec<_>>();
+
+    if sizes.is_empty() { vec![None] } else { sizes }
+}
+
 pub fn init_backend(
     dh: &DisplayHandle,
     event_loop: &mut EventLoop<State>,
@@ -364,17 +402,24 @@ pub fn init_backend(
         surfaces: Vec::new(),
     });
 
-    let output = state
-        .backend
-        .x11()
-        .add_window(event_loop.handle())
-        .with_context(|| "Failed to create wl_output")?;
+    let outputs = window_sizes_from_env()
+        .into_iter()
+        .map(|size| {
+            state
+                .backend
+                .x11()
+                .add_window(event_loop.handle(), size)
+                .with_context(|| "Failed to create wl_output")
+        })
+        .collect::<Result<Vec<_>>>()?;
     state
         .common
         .output_configuration_state
-        .add_heads(std::iter::once(&output));
+        .add_heads(outputs.iter());
     {
-        state.common.add_output(&output);
+        for output in &outputs {
+            state.common.add_output(output);
+        }
         if let Err(err) = state.common.config.read_outputs(
             &mut state.common.output_configuration_state,
             &mut state.backend,
