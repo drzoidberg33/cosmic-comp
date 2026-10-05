@@ -35,7 +35,7 @@ use smithay::{
             AbsolutePositionEvent, Axis, AxisRelativeDirection, AxisSource, ButtonState, Device,
             DeviceCapability, Event, InputBackend, InputEvent, InputTime, KeyState,
             KeyboardKeyEvent, Keycode, PointerAxisEvent, PointerButtonEvent,
-            PointerMotionAbsoluteEvent, UnusedEvent,
+            PointerMotionAbsoluteEvent, PointerMotionEvent, UnusedEvent,
         },
         renderer::{
             Bind, ExportMem, ImportDma, Offscreen,
@@ -372,6 +372,20 @@ impl HeadlessState {
         Ok(())
     }
 
+    /// Moves the pointer by `delta` like a mouse would, through the relative motion path (with
+    /// its clamping, pointer constraints and grab handling).
+    pub fn pointer_motion_relative(state: &mut State, delta: (f64, f64)) {
+        Self::inject_input(
+            state,
+            InputEvent::PointerMotion {
+                event: HeadlessRelativeMotionEvent {
+                    time: InputTime::now(),
+                    delta,
+                },
+            },
+        );
+    }
+
     pub fn pointer_button(state: &mut State, button: u32, pressed: bool) {
         Self::inject_input(
             state,
@@ -631,7 +645,7 @@ impl InputBackend for HeadlessInput {
     type KeyboardKeyEvent = HeadlessKeyEvent;
     type PointerAxisEvent = HeadlessAxisEvent;
     type PointerButtonEvent = HeadlessButtonEvent;
-    type PointerMotionEvent = UnusedEvent;
+    type PointerMotionEvent = HeadlessRelativeMotionEvent;
     type PointerMotionAbsoluteEvent = HeadlessMotionEvent;
     type GestureSwipeBeginEvent = UnusedEvent;
     type GestureSwipeUpdateEvent = UnusedEvent;
@@ -787,3 +801,38 @@ impl AbsolutePositionEvent<HeadlessInput> for HeadlessMotionEvent {
 }
 
 impl PointerMotionAbsoluteEvent<HeadlessInput> for HeadlessMotionEvent {}
+
+/// Relative motion, like a mouse on the KMS backend.
+#[derive(Debug)]
+pub struct HeadlessRelativeMotionEvent {
+    time: InputTime,
+    delta: (f64, f64),
+}
+
+impl Event<HeadlessInput> for HeadlessRelativeMotionEvent {
+    fn time(&self) -> InputTime {
+        self.time
+    }
+
+    fn device(&self) -> HeadlessDevice {
+        HeadlessDevice
+    }
+}
+
+impl PointerMotionEvent<HeadlessInput> for HeadlessRelativeMotionEvent {
+    fn delta_x(&self) -> f64 {
+        self.delta.0
+    }
+
+    fn delta_y(&self) -> f64 {
+        self.delta.1
+    }
+
+    fn delta_x_unaccel(&self) -> f64 {
+        self.delta.0
+    }
+
+    fn delta_y_unaccel(&self) -> f64 {
+        self.delta.1
+    }
+}

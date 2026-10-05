@@ -11,7 +11,9 @@
 //!   active_workspace, floating, maximized}]`
 //! - `{"cmd":"pointer"}` → `x, y` of the pointer
 //! - `{"cmd":"focus"}` → `pointer`, `keyboard`: debug descriptions of the current focus targets
-//! - `{"cmd":"pointer_motion","x":F,"y":F}`
+//! - `{"cmd":"pointer_motion","x":F,"y":F}`: absolute, warps the pointer
+//! - `{"cmd":"pointer_motion_relative","dx":F,"dy":F}`: like a mouse, through the relative motion
+//!   path with its clamping to outputs and grab handling
 //! - `{"cmd":"pointer_button","button":"left"|"right"|"middle"|CODE,"pressed":B}`
 //! - `{"cmd":"pointer_axis","horizontal":F,"vertical":F}`
 //! - `{"cmd":"key","key":EVDEV_CODE,"pressed":B}`
@@ -59,6 +61,10 @@ enum Command {
     Windows,
     Pointer,
     Focus,
+    PointerMotionRelative {
+        dx: f64,
+        dy: f64,
+    },
     PointerMotion {
         x: f64,
         y: f64,
@@ -289,6 +295,10 @@ fn execute(command: Command, state: &mut State) -> Result<Value> {
                 .context("Seat has no pointer")?
                 .current_location();
             Ok(json!({ "x": location.x, "y": location.y }))
+        }
+        Command::PointerMotionRelative { dx, dy } => {
+            HeadlessState::pointer_motion_relative(state, (dx, dy));
+            Ok(json!({}))
         }
         Command::PointerMotion { x, y } => {
             HeadlessState::pointer_motion(state, (x, y).into())?;

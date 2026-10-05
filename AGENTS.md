@@ -121,7 +121,9 @@ How it works:
   - `outputs`, `windows`, `pointer`;
   - `focus` (debug strings of the pointer and keyboard focus targets, useful to find out what
     a click actually hit);
-  - `pointer_motion`, `pointer_button`, `pointer_axis`, `key` (evdev codes);
+  - `pointer_motion` (absolute, warps), `pointer_motion_relative` (like a mouse: the relative
+    motion path with its clamping to outputs and grab handling), `pointer_button`,
+    `pointer_axis`, `key` (evdev codes);
   - `screenshot` (renders synchronously to a PNG) and `sync`;
   - `bench_*` (see below).
 
@@ -149,7 +151,11 @@ How it works:
     `/usr/share/cosmic`) still apply.
   - Helpers:
     - `spawn_client`, `windows`/`wait_window`;
-    - `drag`/`drag_window_to` (real title-bar drags);
+    - `drag`/`drag_window_to` (real title-bar drags), `pointer_relative` and
+      `drag_relative`. **Use relative motion for anything that depends on how a real mouse
+      moves between outputs**, e.g. grabs crossing outputs: on KMS the pointer moves
+      relatively, and that path has its own clamping and grab logic that absolute motion
+      skips (`tests/resize.rs`);
     - `chord(&[keys::KEY_LEFTMETA, keys::KEY_2])` for shortcuts (default `Super+N` switches
       the workspace of the output the pointer is on);
     - `screenshot`/`wait_screenshot` → `Image::coverage` for pixel checks;

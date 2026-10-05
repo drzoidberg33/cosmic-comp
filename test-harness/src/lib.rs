@@ -459,6 +459,49 @@ impl Compositor {
         self.request(json!({"cmd": "sync"})).map(|_| ())
     }
 
+    /// Moves the pointer by `(dx, dy)` through the relative motion path, like a mouse on real
+    /// hardware: the position is clamped to outputs and grabs may restrict it.
+    pub fn pointer_relative(&mut self, (dx, dy): (f64, f64)) -> Result<()> {
+        self.request(json!({"cmd": "pointer_motion_relative", "dx": dx, "dy": dy}))
+            .map(|_| ())
+    }
+
+    /// Like [`Compositor::drag`], but after warping to `from` and pressing, moves with relative
+    /// motion like a mouse. Use it for anything that depends on how real pointers move between
+    /// outputs (absolute motion warps and skips that logic).
+    pub fn drag_relative(&mut self, from: (f64, f64), to: (f64, f64), steps: u32) -> Result<()> {
+        if let Some(elapsed) = self.last_release.map(|t| t.elapsed()) {
+            thread::sleep(Duration::from_millis(400).saturating_sub(elapsed));
+        }
+        self.pointer_motion(from)?;
+        self.button("left", true)?;
+        let distance = ((to.0 - from.0).powi(2) + (to.1 - from.1).powi(2)).sqrt();
+        let mut current = from;
+        let mut move_to = |comp: &mut Self, next: (f64, f64)| -> Result<()> {
+            comp.pointer_relative((next.0 - current.0, next.1 - current.1))?;
+            current = next;
+            thread::sleep(Duration::from_millis(5));
+            Ok(())
+        };
+        if distance > 4.0 {
+            let t = 4.0 / distance;
+            move_to(
+                self,
+                (from.0 + (to.0 - from.0) * t, from.1 + (to.1 - from.1) * t),
+            )?;
+        }
+        for i in 1..=steps {
+            let t = i as f64 / steps as f64;
+            move_to(
+                self,
+                (from.0 + (to.0 - from.0) * t, from.1 + (to.1 - from.1) * t),
+            )?;
+        }
+        self.button("left", false)?;
+        thread::sleep(Duration::from_millis(50));
+        self.request(json!({"cmd": "sync"})).map(|_| ())
+    }
+
     /// Drags a window by its title bar so its top-left corner ends up at `to`.
     pub fn drag_window_to(&mut self, title: &str, to: (i32, i32)) -> Result<WindowInfo> {
         let window = self.window(title)?;
