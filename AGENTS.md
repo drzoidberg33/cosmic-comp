@@ -27,11 +27,25 @@ nothing is written down, upstream commit history and maintainer PR review commen
   the PR template forbid AI-generated code, comments and descriptions in issues and PRs. Work
   produced with agent help in this fork **must not be submitted upstream** as-is. Never open
   PRs, issues or comments against `pop-os/*` repositories.
-- **Deployment:** the custom binary is installed outside the package (e.g.
-  `/opt/cosmic-comp-custom/bin/cosmic-comp`) and launched via a separate login session that
-  puts it first on `PATH`; `cosmic-session` runs `cosmic-comp` from `PATH`
-  (or its first CLI argument). The stock "COSMIC" session stays as a fallback. Never
-  overwrite `/usr/bin/cosmic-comp`.
+- **Deployment:** `cargo build --release && scripts/install-session.sh` (uninstall with
+  `scripts/install-session.sh uninstall`). It installs:
+  - the binary to `/opt/cosmic-comp-custom/bin/cosmic-comp`;
+  - a wrapper `/usr/local/bin/start-cosmic-custom`, which puts that directory first on
+    `PATH` and runs the stock `/usr/bin/start-cosmic` (`cosmic-session` runs `cosmic-comp`
+    from `PATH`, or from its first CLI argument);
+  - a "COSMIC (span-outputs)" login entry in `/usr/share/wayland-sessions/cosmic-custom.desktop`.
+
+  The stock "COSMIC" session stays as a fallback. Never overwrite `/usr/bin/cosmic-comp`.
+  Re-running the script only replaces the binary and keeps an existing wrapper, so
+  environment variables added there survive. Verify the running build with
+  `readlink /proc/$(pgrep -x cosmic-comp)/exe`.
+- **AMD flicker workaround:** on this machine (RX 470/480/570/580, amdgpu), lines flashed
+  across the screen on clicks. That's the upstream amdgpu overlay-plane issue
+  ([pop-os/cosmic-comp#2152](https://github.com/pop-os/cosmic-comp/issues/2152),
+  [#1956](https://github.com/pop-os/cosmic-comp/issues/1956)), not the fork. It's fixed by
+  `export COSMIC_DISABLE_OVERLAY_SCANOUT=1` in the wrapper. If it comes back,
+  `COSMIC_DISABLE_DIRECT_SCANOUT=1` is the stronger option, and a slightly lower or
+  fractional refresh rate also helped some reporters.
 - **Working rules:**
   - Every behavioural change comes with automated tests (`scripts/test.sh`), and testing
     should need as little human involvement as possible.
@@ -331,7 +345,8 @@ data/                keybindings.ron, tiling-exceptions.ron, session/systemd fil
 resources/i18n/      Fluent translations (managed by Weblate; only edit `en/`)
 debian/              packaging (vendored build via `just build-vendored`)
 test-harness/        fork-only integration tests (own Cargo.lock): test-client, harness lib, tests/
-scripts/             fork-only: nested.sh (manual multi-output), test.sh (automated tests)
+scripts/             fork-only: nested.sh (manual multi-output), test.sh (automated tests),
+                     bench.sh (A/B benchmarks), install-session.sh (custom login session)
 ```
 
 Notes relevant to multi-output work:
