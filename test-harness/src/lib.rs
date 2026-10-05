@@ -43,8 +43,17 @@ fn compositor_binary() -> PathBuf {
 }
 
 fn client_binary() -> PathBuf {
-    std::env::var_os("COSMIC_TEST_CLIENT_BIN")
-        .map(PathBuf::from)
+    if let Some(path) = std::env::var_os("COSMIC_TEST_CLIENT_BIN") {
+        return path.into();
+    }
+    // Next to the running binary: `target/<profile>/` for bins, `target/<profile>/deps/` for
+    // integration tests.
+    let exe = std::env::current_exe().unwrap_or_default();
+    exe.ancestors()
+        .skip(1)
+        .take(2)
+        .map(|dir| dir.join("test-client"))
+        .find(|path| path.exists())
         .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("target/debug/test-client"))
 }
 
@@ -80,6 +89,8 @@ pub struct Options {
     pub outputs: String,
     pub config: Vec<ConfigEntry>,
     pub rust_log: String,
+    /// Compositor binary to run instead of the default, e.g. a baseline build for benchmarks.
+    pub binary: Option<PathBuf>,
 }
 
 impl Default for Options {
@@ -88,6 +99,7 @@ impl Default for Options {
             outputs: "1280x720,1280x720".into(),
             config: Vec::new(),
             rust_log: "info".into(),
+            binary: None,
         }
     }
 }
@@ -95,6 +107,11 @@ impl Default for Options {
 impl Options {
     pub fn outputs(mut self, outputs: &str) -> Self {
         self.outputs = outputs.into();
+        self
+    }
+
+    pub fn binary(mut self, binary: impl Into<PathBuf>) -> Self {
+        self.binary = Some(binary.into());
         self
     }
 
@@ -197,7 +214,7 @@ pub struct Compositor {
 
 impl Compositor {
     pub fn start(options: Options) -> Result<Self> {
-        let binary = compositor_binary();
+        let binary = options.binary.clone().unwrap_or_else(compositor_binary);
         if !binary.exists() {
             return Err(format!(
                 "{} does not exist, build it with `cargo build --profile dev-opt` \

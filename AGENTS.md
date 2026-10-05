@@ -143,6 +143,40 @@ Writing tests:
   its implementation.
 - Check new tests for flakiness by running them repeatedly, e.g. 20 times in a loop.
 
+## Performance benchmarks (fork-only)
+
+**Run `scripts/bench.sh` before committing anything that touches rendering, input
+hit-testing, `Shell`/`Workspace` refresh or the floating layout.** It exits non-zero on a
+regression.
+
+- It does an A/B run of the working tree against a baseline revision (`--baseline REV`,
+  default: the `span-baseline` tag, the last commit before the span-outputs feature). Both
+  sides are built with the `bench-opt` profile: release optimisation, no fat LTO,
+  incremental. The baseline is built in a git worktree at `target/bench-baseline/` with its
+  own target dir. The first run builds it from scratch (a few minutes).
+- Scenarios (`test-harness/src/bin/bench.rs`, list them with `bench list`) cover 1–4
+  outputs, 1–20 floating windows, windows straddling seams, and mixed scales. Each one starts
+  a fresh headless compositor and places windows with real title-bar drags.
+- Metrics are measured inside the compositor via the control socket's `bench_*` commands,
+  so there's no IPC noise:
+  - `render/<output>/cpu` and `/total`: a full redraw of each output, until submit and until
+    `glFinish`.
+  - `input/surface_under` and `/element_under`: pointer hit-testing over windows, the
+    desktop and overhangs.
+  - `refresh`: `Common::refresh`.
+- Rounds alternate baseline and candidate (`--rounds N`, default 3). The comparison uses the
+  median over rounds of each metric's median.
+- A metric regresses only when it is slower than both the relative and the absolute
+  threshold allow (see `threshold()` in `bench.rs`). Scenarios with spanning windows have
+  looser render and input thresholds, because drawing and hit-testing a window on two
+  outputs is real extra work. Non-spanning scenarios must stay within noise of the baseline.
+- `--filter SUBSTR` runs a subset, and `--json FILE` writes the comparison.
+  `test-harness/target/release/bench run --binary BIN` measures a single build.
+- Results depend on the machine and its load. Close heavy programs and compare A/B runs
+  from the same session only. Never compare numbers across machines or days.
+- When a regression is real and accepted (e.g. new work that the feature requires), explain
+  it in the commit message with the numbers. Don't just loosen thresholds.
+
 ## Running and manual testing
 
 - **Backend selection:** `COSMIC_BACKEND=kms|x11|winit|headless`. If unset and `DISPLAY` or

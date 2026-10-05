@@ -148,6 +148,14 @@ opt-level = 1
 [profile.dev-opt.package."*"]
 opt-level = 2
 
+# Fork-only: release optimisation for benchmarks, without fat LTO so rebuilds stay quick.
+[profile.bench-opt]
+inherits = "release"
+lto = false
+incremental = true
+codegen-units = 16
+debug = "line-tables-only"
+
 [profile.release]
 lto = "fat"
 
