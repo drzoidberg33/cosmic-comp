@@ -217,6 +217,26 @@ impl Shell {
         update_focus_state(seat, target, state, serial, update_cursor);
 
         state.common.shell.write().update_active();
+
+        // Fork-only: raising a floating window can restack it against windows of other outputs
+        // reaching across (and the other way round), on every output it's drawn on. Redraw them
+        // without waiting for the client to redraw for being activated.
+        if let Some(KeyboardFocusTarget::Element(mapped)) = target
+            && let Some(surface) = mapped.active_window().wl_surface()
+        {
+            let outputs = {
+                let shell = state.common.shell.read();
+                shell
+                    .visible_output_for_surface(&surface)
+                    .cloned()
+                    .into_iter()
+                    .chain(shell.spanned_outputs_for_surface(&surface))
+                    .collect::<Vec<_>>()
+            };
+            for output in outputs {
+                state.backend.schedule_render(&output);
+            }
+        }
     }
 
     // We suppress Element(X) to Fullscreen(X) transition to avoid

@@ -2,6 +2,7 @@ use std::{ops::ControlFlow, time::Instant};
 
 use cosmic_comp_config::workspace::WorkspaceLayout;
 use keyframe::{ease, functions::EaseInOutCubic};
+use smallvec::SmallVec;
 use smithay::{
     desktop::{LayerSurface, PopupKind, PopupManager, layer_map_for_output},
     output::{Output, OutputNoMode},
@@ -49,11 +50,17 @@ pub enum Stage<'a> {
         workspace: &'a Workspace,
         offset: Point<i32, Logical>,
     },
-    /// Floating windows of another output's active workspace that reach onto this output.
+    /// Floating windows of another output's active workspace that reach onto this output, on
+    /// top of the output's own windows. Only while the output switches workspaces; otherwise
+    /// they're stacked among its floating windows, see `Stage::Workspace::reaching`.
     SpanningWorkspace(&'a Workspace),
     Workspace {
         workspace: &'a Workspace,
         offset: Point<i32, Logical>,
+        /// Fork-only: other outputs' active workspaces with floating windows reaching onto this
+        /// output, stacked among this workspace's floating windows by
+        /// `CosmicMapped::stacking`. Only ever non-empty with a zero `offset`.
+        reaching: SmallVec<[&'a Workspace; 2]>,
     },
 }
 
@@ -424,6 +431,7 @@ fn render_input_order_internal<R: 'static>(
     }
 
     // floating windows of other outputs reaching onto this one
+    let mut reaching = SmallVec::new();
     if element_filter != ElementFilter::LayerShellOnly && !has_fullscreen {
         for (other, other_set) in shell.workspaces.sets.iter() {
             if other == output {
@@ -431,8 +439,14 @@ fn render_input_order_internal<R: 'static>(
             }
             let workspace = &other_set.workspaces[other_set.active];
             if workspace.spans_onto(output, seat) {
-                callback(Stage::SpanningWorkspace(workspace))?;
+                reaching.push(workspace);
             }
+        }
+    }
+    // While this output's workspaces slide, they don't belong with either; keep them on top.
+    if previous.is_some() {
+        for workspace in reaching.drain(..) {
+            callback(Stage::SpanningWorkspace(workspace))?;
         }
     }
 
@@ -441,6 +455,7 @@ fn render_input_order_internal<R: 'static>(
         callback(Stage::Workspace {
             workspace,
             offset: current_offset,
+            reaching,
         })?;
 
         // previous workspace windows
@@ -451,6 +466,7 @@ fn render_input_order_internal<R: 'static>(
             callback(Stage::Workspace {
                 workspace,
                 offset: *offset,
+                reaching: SmallVec::new(),
             })?;
         }
     }

@@ -1072,9 +1072,14 @@ where
                     },
                 );
             }
-            Stage::Workspace { workspace, offset } => {
+            Stage::Workspace {
+                workspace,
+                offset,
+                reaching,
+            } => {
                 workspace.render(
                     renderer,
+                    &reaching,
                     last_active_seat,
                     !move_active && is_active_space,
                     overview.clone(),

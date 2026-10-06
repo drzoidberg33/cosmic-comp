@@ -380,14 +380,27 @@ Floating windows stay owned by one workspace on one ("home") output. Wherever th
 other outputs, those outputs draw and hit-test them as well. Tests are in
 `test-harness/tests/span.rs`.
 
-- **Stacking:** `Stage::SpanningWorkspace(&Workspace)` in `render_input_order`
-  (`src/shell/focus/order.rs`) is emitted for every *other* output's active workspace that
-  `Workspace::spans_onto(output, seat)` reports. It sits below sticky windows and above this
-  output's own workspace windows, and is skipped while this output shows a fullscreen window.
-  It's consumed in three places, which must stay in sync:
-  - `workspace_elements` (render),
-  - `State::element_under`,
-  - `State::surface_under`.
+- **Stacking:** `render_input_order` (`src/shell/focus/order.rs`) collects every *other*
+  output's active workspace that `Workspace::spans_onto(output, seat)` reports, unless this
+  output shows a fullscreen window.
+  - **Normally** they go into `Stage::Workspace { reaching, .. }`. `Workspace::render` and
+    `Workspace::toplevel_{element,surface}_under` then stack their floating windows among
+    the workspace's own by `CosmicMapped::stacking` (`Workspace::floating_stack`). So a
+    window raised on this output covers an overhang, and the other way round, and two
+    windows reaching onto each other's output stack the same on both. They stay above
+    this output's tiled windows and below its sticky ones, like its own floating windows.
+  - **While this output switches workspaces** (`previous` is set), they're emitted as
+    `Stage::SpanningWorkspace` on top instead: the workspaces slide, the overhang doesn't.
+    That's also why `reaching` is only non-empty with a zero offset.
+  - The stages are consumed in three places, which must stay in sync:
+    `workspace_elements` (render), `State::element_under` and `State::surface_under`.
+  - **Redraws:** raising changes what other outputs show. `Common::set_focus` redraws the
+    focused window's home and the outputs it reaches onto, without waiting for the client
+    to redraw for being activated.
+  - **Cost:** without `reaching`, the old single-layer paths run unchanged. With it, every
+    frame and pointer event collects and sorts the floating windows of the workspaces
+    involved, a handful usually.
+  - **Tests:** `stacking.rs`.
 - **Stacking numbers:** each floating layer keeps its own stacking order (the smithay
   `Space`'s element order), which says nothing about windows of different layers.
   `CosmicMapped::stacking()` does: a global counter, bumped whenever a window goes on top
@@ -486,7 +499,6 @@ other outputs, those outputs draw and hit-test them as well. Tests are in
 - **Known limitations:**
   - Only floating windows span; tiled, maximized, fullscreen and sticky windows don't.
   - Popups (menus) of a spanning window aren't drawn or hit-tested on other outputs yet.
-  - Windows spanning onto another output always stack above that output's own windows.
   - The overhang doesn't follow the home output's workspace-switch animation; it pops.
   - Foreign-toplevel output membership (panels and docks) is still the home output only.
 

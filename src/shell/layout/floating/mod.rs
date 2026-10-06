@@ -792,32 +792,11 @@ impl FloatingLayout {
         self.space
             .elements()
             .rev()
-            .map(|e| {
-                (
-                    e,
-                    self.space.element_location(e).unwrap() - e.geometry().loc,
-                )
+            .find(|e| {
+                self.toplevel_surface_under_element(e, location, seat)
+                    .is_some()
             })
-            .filter(|(e, render_location)| {
-                let mut bbox = e.bbox();
-                bbox.loc += *render_location;
-                bbox.to_f64().contains(location.as_logical())
-            })
-            .find_map(|(e, render_location)| {
-                let render_location = render_location.as_local().to_f64();
-                let point = location - render_location;
-                if e.focus_under(
-                    point.as_logical(),
-                    WindowSurfaceType::TOPLEVEL | WindowSurfaceType::SUBSURFACE,
-                    seat,
-                )
-                .is_some()
-                {
-                    Some(e.clone().into())
-                } else {
-                    None
-                }
-            })
+            .map(|e| e.clone().into())
     }
 
     pub fn popup_surface_under(
@@ -861,29 +840,30 @@ impl FloatingLayout {
         self.space
             .elements()
             .rev()
-            .map(|e| {
-                (
-                    e,
-                    self.space.element_location(e).unwrap() - e.geometry().loc,
-                )
-            })
-            .filter(|(e, render_location)| {
-                let mut bbox = e.bbox();
-                bbox.loc += *render_location;
-                bbox.to_f64().contains(location.as_logical())
-            })
-            .find_map(|(e, render_location)| {
-                let render_location = render_location.as_local().to_f64();
-                let point = location - render_location;
-                e.focus_under(
-                    point.as_logical(),
-                    WindowSurfaceType::TOPLEVEL | WindowSurfaceType::SUBSURFACE,
-                    seat,
-                )
-                .map(|(surface, surface_offset)| {
-                    (surface, render_location + surface_offset.as_local())
-                })
-            })
+            .find_map(|e| self.toplevel_surface_under_element(e, location, seat))
+    }
+
+    /// The toplevel surface (or a subsurface) of `e`, one of this layout's windows, under
+    /// `location` in this layout's local coordinates, with its location.
+    pub fn toplevel_surface_under_element(
+        &self,
+        e: &CosmicMapped,
+        location: Point<f64, Local>,
+        seat: &Seat<State>,
+    ) -> Option<(PointerFocusTarget, Point<f64, Local>)> {
+        let render_location = self.space.element_location(e)? - e.geometry().loc;
+        let mut bbox = e.bbox();
+        bbox.loc += render_location;
+        if !bbox.to_f64().contains(location.as_logical()) {
+            return None;
+        }
+        let render_location = render_location.as_local().to_f64();
+        e.focus_under(
+            (location - render_location).as_logical(),
+            WindowSurfaceType::TOPLEVEL | WindowSurfaceType::SUBSURFACE,
+            seat,
+        )
+        .map(|(surface, surface_offset)| (surface, render_location + surface_offset.as_local()))
     }
 
     pub fn update_pointer_position(&mut self, location: Option<Point<f64, Local>>) {
@@ -1704,11 +1684,15 @@ impl FloatingLayout {
     /// The layout's windows in the order they're drawn, topmost first: windows playing their
     /// minimize animation, then the stacking order.
     pub fn render_order(&self) -> impl Iterator<Item = &CosmicMapped> {
+        self.minimizing().chain(self.space.elements().rev())
+    }
+
+    /// Windows playing their minimize animation, no longer in the stacking order.
+    pub fn minimizing(&self) -> impl Iterator<Item = &CosmicMapped> {
         self.animations
             .iter()
             .filter(|(_, anim)| matches!(anim, Animation::Minimize { .. }))
             .map(|(elem, _)| elem)
-            .chain(self.space.elements().rev())
     }
 
     /// What [`FloatingLayout::render_element_on`] needs to know about `target`, computed once

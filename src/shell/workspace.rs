@@ -829,14 +829,18 @@ impl Workspace {
             })
     }
 
+    /// `reaching`: other outputs' workspaces with floating windows reaching onto this output,
+    /// stacked among this workspace's floating windows (see `Stage::Workspace::reaching`).
     pub fn toplevel_element_under(
         &self,
         location: Point<f64, Global>,
+        reaching: &[&Workspace],
         seat: &Seat<State>,
     ) -> Option<KeyboardFocusTarget> {
         if !self.output.geometry().contains(location.to_i32_floor()) {
             return None;
         }
+        let global = location;
         let location = location.to_local(&self.output);
 
         let fullscreen_element_under =
@@ -864,8 +868,13 @@ impl Workspace {
             return fullscreen_element_under(fullscreen, geometry);
         }
 
-        self.floating_layer
-            .toplevel_element_under(location, seat)
+        let floating = if reaching.is_empty() {
+            self.floating_layer.toplevel_element_under(location, seat)
+        } else {
+            self.floating_toplevel_under(global, reaching, seat)
+                .map(|(mapped, _)| mapped.clone().into())
+        };
+        floating
             .or_else(|| self.tiling_layer.toplevel_element_under(location, seat))
             .or_else(|| {
                 if last_focused.is_none_or(|t| !matches!(t, FocusTarget::Fullscreen(_)))
@@ -928,16 +937,27 @@ impl Workspace {
             .map(|(m, p)| (m, p.to_global(&self.output)))
     }
 
+    /// `reaching`: see [`Workspace::toplevel_element_under`].
     pub fn toplevel_surface_under(
         &self,
         location: Point<f64, Global>,
+        reaching: &[&Workspace],
         overview: OverviewMode,
         seat: &Seat<State>,
     ) -> Option<(PointerFocusTarget, Point<f64, Global>)> {
         if !self.output.geometry().contains(location.to_i32_floor()) {
             return None;
         }
+        let global = location;
         let location = location.to_local(&self.output);
+        let floating_under = || {
+            if reaching.is_empty() {
+                self.floating_layer.toplevel_surface_under(location, seat)
+            } else {
+                self.floating_toplevel_under(global, reaching, seat)
+                    .map(|(_, under)| under)
+            }
+        };
 
         let check_fullscreen = |fullscreen: &FullscreenSurface| {
             if !fullscreen.is_animating() {
@@ -963,7 +983,7 @@ impl Workspace {
             .iter()
             .find(|f| last_focused.is_some_and(|t| t == &f.surface))
             .and_then(check_fullscreen)
-            .or_else(|| self.floating_layer.toplevel_surface_under(location, seat))
+            .or_else(floating_under)
             .or_else(|| {
                 self.tiling_layer
                     .toplevel_surface_under(location, overview, seat)
@@ -1625,6 +1645,117 @@ impl Workspace {
                 .all(|f| !f.alive() || f.ended_at.is_some())
     }
 
+    /// Fork-only: the floating windows on this workspace's output, its own and those of
+    /// `reaching` (see `Stage::Workspace::reaching`), topmost first, with their workspace.
+    /// Windows of different layers are ordered by `CosmicMapped::stacking`, which agrees with
+    /// each layer's own order.
+    fn floating_stack<'a>(
+        &'a self,
+        reaching: &[&'a Workspace],
+    ) -> Vec<(&'a Workspace, &'a CosmicMapped)> {
+        let mut stack = std::iter::once(self)
+            .chain(reaching.iter().copied())
+            .flat_map(|workspace| {
+                workspace
+                    .floating_layer
+                    .mapped()
+                    .map(move |mapped| (workspace, mapped))
+            })
+            .collect::<Vec<_>>();
+        stack.sort_by_key(|(_, mapped)| std::cmp::Reverse((mapped.z_index(), mapped.stacking())));
+        stack
+    }
+
+    /// The topmost floating window of [`Workspace::floating_stack`] whose toplevel surface (or
+    /// a subsurface) is under `location`, with that surface and its location in this output's
+    /// local coordinates.
+    fn floating_toplevel_under<'a>(
+        &'a self,
+        location: Point<f64, Global>,
+        reaching: &[&'a Workspace],
+        seat: &Seat<State>,
+    ) -> Option<(&'a CosmicMapped, (PointerFocusTarget, Point<f64, Local>))> {
+        self.floating_stack(reaching)
+            .into_iter()
+            .find_map(|(workspace, mapped)| {
+                let home = &workspace.output;
+                workspace
+                    .floating_layer
+                    .toplevel_surface_under_element(mapped, location.to_local(home), seat)
+                    .map(|(target, point)| {
+                        (
+                            mapped,
+                            (target, point.to_global(home).to_local(&self.output)),
+                        )
+                    })
+            })
+    }
+
+    /// Renders this workspace's floating windows with those of `reaching` stacked among them,
+    /// like [`FloatingLayout::render`] does for one layer.
+    fn render_floating_with_reaching<R>(
+        &self,
+        reaching: &[&Workspace],
+        renderer: &mut R,
+        last_active_seat: &Seat<State>,
+        focused: Option<&CosmicMapped>,
+        mut resize_indicator: Option<(ResizeMode, ResizeIndicator)>,
+        indicator_thickness: u8,
+        alpha: f32,
+        theme: &CosmicTheme,
+        scanout_node: Option<DrmNode>,
+        push: &mut dyn FnMut(CosmicMappedRenderElement<R>),
+    ) where
+        R: AsGlowRenderer,
+        R::TextureId: Send + Clone + 'static,
+        CosmicMappedRenderElement<R>: RenderElement<R>,
+        CosmicWindowRenderElement<R>: RenderElement<R>,
+        CosmicStackRenderElement<R>: RenderElement<R>,
+    {
+        // Each layer's focused window and what it needs to render for this output.
+        let layers = std::iter::once((self, focused.cloned()))
+            .chain(reaching.iter().map(|workspace| {
+                let focused = match workspace.focus_stack.get(last_active_seat).last() {
+                    Some(FocusTarget::Window(mapped)) => Some(mapped.clone()),
+                    _ => None,
+                };
+                (*workspace, focused)
+            }))
+            .map(|(workspace, focused)| {
+                let target = workspace.floating_layer.render_target(&self.output);
+                (workspace, focused, target)
+            })
+            .collect::<SmallVec<[_; 3]>>();
+        let mut render = |workspace: &Workspace, elem: &CosmicMapped, renderer: &mut R| {
+            let (_, focused, target) = layers
+                .iter()
+                .find(|(w, _, _)| std::ptr::eq(*w, workspace))
+                .unwrap();
+            workspace.floating_layer.render_element_on(
+                renderer,
+                elem,
+                target,
+                focused.as_ref(),
+                resize_indicator.as_mut(),
+                indicator_thickness,
+                alpha,
+                theme,
+                scanout_node,
+                push,
+            );
+        };
+
+        // Windows playing their minimize animation first, as in `FloatingLayout::render_order`.
+        for (workspace, _, _) in layers.iter() {
+            for elem in workspace.floating_layer.minimizing() {
+                render(workspace, elem, renderer);
+            }
+        }
+        for (workspace, elem) in self.floating_stack(reaching) {
+            render(workspace, elem, renderer);
+        }
+    }
+
     /// Whether floating windows of this workspace are shown on `output`, which isn't the
     /// workspace's own output, because they reach across onto it.
     pub fn spans_onto(&self, output: &Output, seat: &Seat<State>) -> bool {
@@ -1671,10 +1802,13 @@ impl Workspace {
         );
     }
 
+    /// `reaching`: other outputs' workspaces with floating windows reaching onto this output,
+    /// stacked among this workspace's floating windows (see `Stage::Workspace::reaching`).
     #[profiling::function]
     pub fn render<'a, R>(
         &self,
         renderer: &mut R,
+        reaching: &[&Workspace],
         last_active_seat: &Seat<State>,
         render_focus: bool,
         overview: (OverviewMode, Option<(SwapIndicator, Option<&Tree<Data>>)>),
@@ -1814,22 +1948,38 @@ impl Workspace {
                 OverviewMode::None => 1.0,
             };
 
-            self.floating_layer.render(
-                renderer,
-                focused.as_ref().and_then(|target| {
-                    if let FocusTarget::Window(mapped) = target {
-                        Some(mapped)
-                    } else {
-                        None
-                    }
-                }),
-                resize_indicator.clone(),
-                indicator_thickness,
-                alpha,
-                theme,
-                scanout_node,
-                &mut |elem| push(elem.into()),
-            );
+            let focused_mapped = focused.as_ref().and_then(|target| {
+                if let FocusTarget::Window(mapped) = target {
+                    Some(mapped)
+                } else {
+                    None
+                }
+            });
+            if reaching.is_empty() {
+                self.floating_layer.render(
+                    renderer,
+                    focused_mapped,
+                    resize_indicator.clone(),
+                    indicator_thickness,
+                    alpha,
+                    theme,
+                    scanout_node,
+                    &mut |elem| push(elem.into()),
+                );
+            } else {
+                self.render_floating_with_reaching(
+                    reaching,
+                    renderer,
+                    last_active_seat,
+                    focused_mapped,
+                    resize_indicator.clone(),
+                    indicator_thickness,
+                    alpha,
+                    theme,
+                    scanout_node,
+                    &mut |elem| push(elem.into()),
+                );
+            }
 
             let alpha = match &overview.0 {
                 OverviewMode::Started(_, start) => Some(

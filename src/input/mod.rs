@@ -2863,7 +2863,11 @@ impl State {
                             return ControlFlow::Break(Ok(Some(element)));
                         }
                     }
-                    Stage::Workspace { workspace, offset } => {
+                    Stage::Workspace {
+                        workspace,
+                        offset,
+                        reaching,
+                    } => {
                         let location = global_pos + offset.as_global().to_f64();
                         let output = workspace.output();
                         let output_geo = output.geometry().to_local(output);
@@ -2872,7 +2876,8 @@ impl State {
                             .is_some_and(|geometry| {
                                 geometry.contains(global_pos.to_local(output).to_i32_floor())
                             })
-                            && let Some(element) = workspace.toplevel_element_under(location, seat)
+                            && let Some(element) =
+                                workspace.toplevel_element_under(location, &reaching, seat)
                         {
                             return ControlFlow::Break(Ok(Some(element)));
                         }
@@ -3033,11 +3038,18 @@ impl State {
                             return ControlFlow::Break(Ok(Some(under)));
                         }
                     }
-                    Stage::Workspace { workspace, offset } => {
+                    Stage::Workspace {
+                        workspace,
+                        offset,
+                        reaching,
+                    } => {
                         let global_pos = global_pos + offset.to_f64().as_global();
-                        if let Some(under) =
-                            workspace.toplevel_surface_under(global_pos, overview.clone(), seat)
-                        {
+                        if let Some(under) = workspace.toplevel_surface_under(
+                            global_pos,
+                            &reaching,
+                            overview.clone(),
+                            seat,
+                        ) {
                             return ControlFlow::Break(Ok(Some(under)));
                         }
                     }
