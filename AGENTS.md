@@ -406,7 +406,9 @@ other outputs, those outputs draw and hit-test them as well. Tests are in
 - **Rendering:** `FloatingLayout::render_on(target, ...)` renders the layout for any output.
   It offsets positions by `home.loc - target.loc` and uses the target's scale.
   `FloatingLayout::render` is `render_on(home)`. The resize indicator only draws on the home
-  output.
+  output. `render_on` walks `render_order()` and draws each window with
+  `render_element_on`, using a `FloatingRenderTarget` computed once per frame by
+  `render_target(target)`; use those to draw windows of several layers interleaved.
 - **Hit-testing:** the floating layer's `toplevel_*_under` take home-local coordinates and
   don't bounds-check, so global positions on other outputs are converted with
   `to_local(home)`. `Workspace::*_under` do bounds-check against their own output.
