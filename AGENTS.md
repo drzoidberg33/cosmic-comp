@@ -53,6 +53,10 @@ nothing is written down, upstream commit history and maintainer PR review commen
     (`scripts/bench.sh`) before committing.
   - **Keep this file up to date** in the same commit as the change: new commands, helpers,
     gotchas you hit, design decisions and known limitations. It's the memory of this fork.
+  - `README.md` is the user-facing overview: what works, known limitations, build
+    dependencies, install script, AMD workaround and the benchmark table. Update it when
+    any of those change. Re-run `scripts/bench.sh --rounds 5` and refresh the table after
+    changes to rendering, input or refresh paths, noting the commits compared.
 
 ## Setup
 
