@@ -198,6 +198,20 @@ Writing tests:
   its implementation.
 - Check new tests for flakiness by running them repeatedly, e.g. 20 times in a loop.
 - Don't run tests or other heavy work while `scripts/bench.sh` is measuring.
+- **Headless can't reproduce everything KMS does.** When a report from real hardware doesn't
+  reproduce, capture evidence there before guessing again:
+  - `WAYLAND_DEBUG=1 <app> 2> trace.log` on the user's session shows configures, frame
+    callbacks and their latency;
+  - temporary `warn!` logging behind an environment variable, set in the session wrapper
+    (`/usr/local/bin/start-cosmic-custom`). You can read the journal of the user's running
+    session yourself. The plain `journalctl` output only shows the message; tracing fields
+    show up as `F_*` with
+    `journalctl --user -b -t cosmic-comp -o json | jq 'select(.MESSAGE | test("..."))'`.
+    Remove the logging once the bug is fixed.
+
+  Then turn what you learn into a headless test that fails before the fix. Check the
+  evidence against your theory first: a fix for a theory the evidence doesn't support
+  wastes a release cycle on the user's hardware.
 
 ## Performance benchmarks (fork-only)
 
@@ -366,6 +380,38 @@ other outputs, those outputs draw and hit-test them as well. Tests are in
   across outputs. With it, the edge stuck at the seam and back-and-forth resizing felt
   like stutter. Edge snapping during resizes (`edge_snap_threshold`, default 0 = off) still
   only snaps to the home output's edges.
+- **Redraws on commit:** the compositor handler schedules a render only on
+  `Shell::visible_output_for_surface`, a single output: the window's home. For spanning
+  windows it also schedules `Shell::spanned_outputs_for_surface`, which uses current
+  geometry, not the throttled `spanned_outputs`. Without that the overhang froze while a
+  spanning window updated (e.g. resizing a terminal across a seam).
+  `resize.rs::overhang_is_redrawn_while_a_spanning_window_is_resized` covers it.
+- **Frame callbacks:** a surface only gets frame callbacks from renders of its *primary
+  output*, in `Common::send_frames(output)`. Otherwise it gets the ~1s throttled callbacks
+  meant for invisible surfaces.
+  - **The primary output moves:** smithay's `default_primary_scanout_output_compare`
+    switches to another output once the surface's visible area there is at least twice
+    that on the current one. So a window mostly on another output has *that* output as
+    its primary.
+  - **What went wrong:** `send_frames` only walked the output's own workspaces, never the
+    windows reaching onto it from elsewhere. Those windows got only the ~1s callbacks.
+    On real hardware, a terminal resized across a seam stalled for ~994ms per frame once
+    about two thirds of it was on the other display. Frame-paced clients only commit
+    after a callback, and only commits schedule renders, so nothing recovered by itself.
+  - **The fix:** `send_frames` also walks `Shell::windows_reaching_onto(output)` (current
+    geometry). The usual primary output check decides which output sends.
+  - **Tested by:**
+    `resize.rs::window_mostly_on_another_output_keeps_getting_frames_while_resized`.
+  - **Not the cause:** spanning windows don't lose their primary output on KMS. Logging
+    its changes on the affected machine showed it only alternating between the two
+    displays. A fallback for windows without one was tried and dropped.
+- **Don't lock windows or surfaces inside surface-tree callbacks.**
+  - **Why:** `send_frame`/`with_surfaces` callbacks run with the window's internal mutex
+    and the surface's data lock held, and neither lock is re-entrant. So inside
+    `should_send`, `update_primary_output` processors and similar, calling
+    `CosmicMapped::windows()`/`has_surface` or `get_parent` on the same tree **deadlocks**.
+  - **Instead:** collect what you need (e.g. whole surface trees with `with_surfaces`)
+    before the traversal and only compare surfaces inside it.
 - **Re-homing:** a floating window can end up entirely on another output, e.g. after
   shrinking a spanning window from its far edge.
   - **What upstream did:** `FloatingLayout::refresh` re-placed (re-centred) any window no

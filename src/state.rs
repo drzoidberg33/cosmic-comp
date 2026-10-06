@@ -1443,6 +1443,15 @@ impl Common {
                 }
             });
 
+            // Windows of other outputs reaching onto this one. Once most of a window is here,
+            // this is its primary output and only this output's renders pace it.
+            for mapped in shell.windows_reaching_onto(output) {
+                for (window, _) in mapped.windows() {
+                    let throttle = throttle(&window, window.x11_surface().is_some());
+                    window.send_frame(output, time, throttle, should_send);
+                }
+            }
+
             // other (throttled) windows
             active.minimized_windows.iter().for_each(|m| {
                 for window in m.windows() {

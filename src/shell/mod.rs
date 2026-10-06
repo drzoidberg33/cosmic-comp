@@ -2059,6 +2059,59 @@ impl Shell {
         }
     }
 
+    /// Floating windows of other outputs' active workspaces that reach onto `output` and are
+    /// drawn on it, from their current geometry.
+    pub fn windows_reaching_onto(&self, output: &Output) -> Vec<CosmicMapped> {
+        let mut windows = Vec::new();
+        for (home, set) in self.workspaces.sets.iter() {
+            if home == output {
+                continue;
+            }
+            let workspace = &set.workspaces[set.active];
+            for mapped in workspace.floating_layer.mapped() {
+                let Some(geometry) = workspace.floating_layer.space.element_geometry(mapped) else {
+                    continue;
+                };
+                if geometry
+                    .as_local()
+                    .to_global(home)
+                    .overlaps(output.geometry())
+                {
+                    windows.push(mapped.clone());
+                }
+            }
+        }
+        windows
+    }
+
+    /// Outputs other than its own that the floating window containing `surface` reaches onto
+    /// and is drawn on, so its commits can redraw them too (see `visible_output_for_surface`).
+    pub fn spanned_outputs_for_surface(&self, surface: &WlSurface) -> Vec<Output> {
+        for (home, set) in self.workspaces.sets.iter() {
+            let workspace = &set.workspaces[set.active];
+            let Some(mapped) = workspace
+                .floating_layer
+                .mapped()
+                .find(|m| m.has_surface(surface, WindowSurfaceType::ALL))
+            else {
+                continue;
+            };
+            let Some(geometry) = workspace.floating_layer.space.element_geometry(mapped) else {
+                return Vec::new();
+            };
+            let geometry = geometry.as_local().to_global(home);
+            if home.geometry().contains_rect(geometry) {
+                return Vec::new();
+            }
+            return self
+                .outputs()
+                .filter(|o| *o != home && o.geometry().overlaps(geometry))
+                .cloned()
+                .collect();
+        }
+        Vec::new()
+    }
+
     pub fn visible_output_for_surface(&self, surface: &WlSurface) -> Option<&Output> {
         // NOTE: Keep in sync with surface iteration in `render_input_order_internal`
 

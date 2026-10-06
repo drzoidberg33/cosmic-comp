@@ -275,6 +275,11 @@ impl CompositorHandler for State {
         // schedule a new render
         if let Some(output) = shell.visible_output_for_surface(surface) {
             self.backend.schedule_render(output);
+            // Floating windows spanning outputs are drawn on those too, which also send their
+            // frame callbacks when one of them is the window's primary output.
+            for output in shell.spanned_outputs_for_surface(surface) {
+                self.backend.schedule_render(&output);
+            }
         }
 
         if mapped {

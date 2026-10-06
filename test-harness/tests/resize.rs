@@ -180,3 +180,95 @@ fn window_shrunk_off_its_home_output_moves_to_the_other_output_in_place() {
         client.events_since(start)
     );
 }
+
+/// A frame-paced client (it only draws again once its last frame was presented, like GPU
+/// toolkits) placed exactly half on each output: 880..1680 with the seam at 1280.
+fn frame_paced_half_and_half(comp: &mut Compositor) -> (Client, WindowInfo) {
+    let mut client = comp
+        .spawn_client("w", &["--frame-paced", "--width", "800", "--height", "500"])
+        .unwrap();
+    comp.wait_window("w", "mapped", |_| true).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let mapped = comp.window("w").unwrap();
+    let grab = 200.0;
+    let from = (
+        mapped.geometry.x as f64 + grab,
+        mapped.geometry.y as f64 + 18.0,
+    );
+    comp.drag(from, (880.0 + grab, 100.0 + 18.0), 30).unwrap();
+    let window = comp
+        .wait_window("w", "placed", |w| {
+            (w.geometry.x, w.geometry.y) == (880, 100)
+        })
+        .unwrap();
+    client.sync().unwrap();
+    (client, window)
+}
+
+/// Grows `window` onto HEADLESS-1 by its right edge, first by `head_start` px at once, then for
+/// a second with ~125 relative motion events per second like a mouse. Returns the client's
+/// frame callbacks during that second.
+fn resize_for_a_second(
+    comp: &mut Compositor,
+    client: &mut Client,
+    window: &WindowInfo,
+    head_start: f64,
+) -> usize {
+    let y = window.geometry.y as f64 + 200.0;
+    comp.pointer_motion((window.geometry.right() as f64 + BORDER, y))
+        .unwrap();
+    comp.button("left", true).unwrap();
+    for _ in 0..(head_start / 20.0) as usize {
+        comp.pointer_relative((20.0, 0.0)).unwrap();
+    }
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    let start = client.history.len();
+    let begin = std::time::Instant::now();
+    while begin.elapsed() < std::time::Duration::from_secs(1) {
+        comp.pointer_relative((2.0, 0.0)).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(8));
+    }
+    comp.button("left", false).unwrap();
+    client.sync().unwrap();
+    client
+        .events_since(start)
+        .iter()
+        .filter(|e| e["event"] == "frame")
+        .count()
+}
+
+#[test]
+fn overhang_is_redrawn_while_a_spanning_window_is_resized() {
+    let mut comp = Compositor::start(Options::default()).unwrap();
+    let (mut client, window) = frame_paced_half_and_half(&mut comp);
+    let before = comp.outputs().unwrap();
+
+    let frames = resize_for_a_second(&mut comp, &mut client, &window, 0.0);
+
+    let after = comp.outputs().unwrap();
+    let redraws = |name: &str| {
+        let count =
+            |outputs: &[OutputInfo]| outputs.iter().find(|o| o.name == name).unwrap().renders;
+        count(&after) - count(&before)
+    };
+    let (home, other) = (redraws("HEADLESS-0"), redraws("HEADLESS-1"));
+    // Commits used to only redraw the window's own output, freezing the overhang (and
+    // stalling frame callbacks whenever the other output was the window's primary one).
+    assert!(
+        other * 10 >= home * 8,
+        "HEADLESS-1 redrawn {other} times, HEADLESS-0 {home} times"
+    );
+    assert!(frames >= 30, "only {frames} frames in a second of resizing");
+}
+
+#[test]
+fn window_mostly_on_another_output_keeps_getting_frames_while_resized() {
+    let mut comp = Compositor::start(Options::default()).unwrap();
+    let (mut client, window) = frame_paced_half_and_half(&mut comp);
+    // 400px stay on HEADLESS-0, 1000px end up on HEADLESS-1, making it the primary output.
+    let frames = resize_for_a_second(&mut comp, &mut client, &window, 600.0);
+    let window = comp.window("w").unwrap();
+    assert_eq!(window.output, "HEADLESS-0", "{window:?}");
+    assert_eq!(window.primary_output.as_deref(), Some("HEADLESS-1"), "{window:?}");
+    assert!(frames >= 30, "only {frames} frames in a second of resizing");
+}
