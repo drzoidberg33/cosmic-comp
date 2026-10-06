@@ -168,6 +168,8 @@ pub struct OutputInfo {
     pub name: String,
     pub geometry: Rect,
     pub scale: f64,
+    /// Renders of the output so far.
+    pub renders: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -181,6 +183,8 @@ pub struct WindowInfo {
     pub active_workspace: bool,
     pub floating: bool,
     pub maximized: bool,
+    /// The output whose renders send the window its frame callbacks.
+    pub primary_output: Option<String>,
 }
 
 impl WindowInfo {
@@ -342,6 +346,7 @@ impl Compositor {
                 name: o["name"].as_str().unwrap_or_default().to_string(),
                 geometry: rect(o),
                 scale: o["scale"].as_f64().unwrap_or(1.0),
+                renders: o["renders"].as_u64().unwrap_or_default(),
             })
             .collect())
     }
@@ -368,6 +373,7 @@ impl Compositor {
                 active_workspace: w["active_workspace"].as_bool().unwrap_or_default(),
                 floating: w["floating"].as_bool().unwrap_or_default(),
                 maximized: w["maximized"].as_bool().unwrap_or_default(),
+                primary_output: w["primary_output"].as_str().map(str::to_string),
             })
             .collect())
     }

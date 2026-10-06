@@ -85,6 +85,8 @@ struct Surface {
     damage_tracker: OutputDamageTracker,
     screen_filter_state: ScreenFilterStorage,
     render_pending: bool,
+    /// Renders so far, for tests to see whether an output gets redrawn.
+    renders: u64,
 }
 
 impl HeadlessState {
@@ -125,6 +127,7 @@ impl HeadlessState {
             buffer,
             screen_filter_state: ScreenFilterStorage::default(),
             render_pending: false,
+            renders: 0,
         });
         self.schedule_render(&output);
 
@@ -178,6 +181,7 @@ impl HeadlessState {
             .find(|s| s.output == *output)
             .with_context(|| format!("Unknown output {}", output.name()))?;
         surface.render_pending = false;
+        surface.renders += 1;
 
         let size = output
             .current_mode()
@@ -283,6 +287,14 @@ impl HeadlessState {
         Ok((cpu, total))
     }
 
+    /// Number of renders of `output` so far.
+    pub fn render_count(&self, output: &Output) -> u64 {
+        self.surfaces
+            .iter()
+            .find(|s| s.output == *output)
+            .map_or(0, |s| s.renders)
+    }
+
     pub fn all_outputs(&self) -> Vec<Output> {
         self.surfaces.iter().map(|s| s.output.clone()).collect()
     }
@@ -326,18 +338,10 @@ impl HeadlessState {
             );
         }
 
+        // Unlike the nested backends, don't schedule renders on all outputs here: like on KMS,
+        // only what the input path and client commits schedule gets rendered, so tests see
+        // missing redraws.
         state.process_input_event(event, crate::input::InputBackendId::Normal);
-
-        let outputs = state
-            .common
-            .shell
-            .read()
-            .outputs()
-            .cloned()
-            .collect::<Vec<_>>();
-        for output in outputs {
-            state.backend.schedule_render(&output);
-        }
     }
 
     /// Moves the pointer to `position` in global logical coordinates.

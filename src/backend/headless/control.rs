@@ -6,9 +6,11 @@
 //! either `{"ok":true,...}` or `{"ok":false,"error":"..."}`. Requests on a connection are
 //! handled in order. Positions are global logical coordinates.
 //!
-//! - `{"cmd":"outputs"}` → `outputs: [{name, x, y, width, height, scale}]`
+//! - `{"cmd":"outputs"}` → `outputs: [{name, x, y, width, height, scale, renders}]`, `renders`
+//!   counting renders of the output so far
 //! - `{"cmd":"windows"}` → `windows: [{title, app_id, x, y, width, height, output, workspace,
-//!   active_workspace, floating, maximized}]`
+//!   active_workspace, floating, maximized, primary_output}]`. `primary_output` is the output
+//!   whose renders send the window its frame callbacks.
 //! - `{"cmd":"pointer"}` → `x, y` of the pointer
 //! - `{"cmd":"focus"}` → `pointer`, `keyboard`: debug descriptions of the current focus targets
 //! - `{"cmd":"pointer_motion","x":F,"y":F}`: absolute, warps the pointer
@@ -35,12 +37,14 @@ use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use smithay::{
+    desktop::utils::surface_primary_scanout_output,
     output::Output,
     reexports::calloop::{
         Interest, LoopHandle, Mode, PostAction,
         generic::{Generic, NoIoDrop},
     },
     utils::Point,
+    wayland::{compositor::with_states, seat::WaylandFocus},
 };
 use std::{
     io::{ErrorKind, Read, Write},
@@ -240,6 +244,9 @@ fn write_all(stream: &NoIoDrop<UnixStream>, mut bytes: &[u8]) -> std::io::Result
 fn execute(command: Command, state: &mut State) -> Result<Value> {
     match command {
         Command::Outputs => {
+            let BackendData::Headless(headless) = &state.backend else {
+                unreachable!("control socket only exists on the headless backend");
+            };
             let shell = state.common.shell.read();
             let outputs = shell
                 .outputs()
@@ -252,6 +259,7 @@ fn execute(command: Command, state: &mut State) -> Result<Value> {
                         "width": geometry.size.w,
                         "height": geometry.size.h,
                         "scale": output.current_scale().fractional_scale(),
+                        "renders": headless.render_count(output),
                     })
                 })
                 .collect::<Vec<_>>();
@@ -268,7 +276,15 @@ fn execute(command: Command, state: &mut State) -> Result<Value> {
                         };
                         let geometry = geometry.to_global(&workspace.output);
                         let window = mapped.active_window();
+                        // The output whose renders send this window its frame callbacks.
+                        let primary_output = window.wl_surface().and_then(|surface| {
+                            with_states(&surface, |states| {
+                                surface_primary_scanout_output(&surface, states)
+                            })
+                            .map(|o| o.name())
+                        });
                         windows.push(json!({
+                            "primary_output": primary_output,
                             "title": window.title(),
                             "app_id": window.app_id(),
                             "x": geometry.loc.x,

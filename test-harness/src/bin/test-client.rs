@@ -4,6 +4,10 @@
 //!
 //! Prints one JSON event per line on stdout and reads JSON commands, one per
 //! line, from stdin. See the crate docs for the protocol.
+//!
+//! With `--frame-paced` it behaves like a GPU toolkit: it acks configures right away but only
+//! draws a new buffer once the frame callback of the previous one fired, and prints
+//! `{"event":"frame"}` for every frame callback.
 
 use std::{
     collections::HashMap,
@@ -75,6 +79,7 @@ struct Args {
     height: u32,
     color: u32,
     decorations: Decorations,
+    frame_paced: bool,
 }
 
 fn parse_color(s: &str) -> Option<u32> {
@@ -93,6 +98,7 @@ fn parse_args() -> Result<Args, String> {
         height: 300,
         color: 0xff0000,
         decorations: Decorations::Server,
+        frame_paced: false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
@@ -124,6 +130,7 @@ fn parse_args() -> Result<Args, String> {
                     other => return Err(format!("invalid --decorations: {other}")),
                 };
             }
+            "--frame-paced" => args.frame_paced = true,
             other => return Err(format!("unknown argument: {other}")),
         }
     }
@@ -171,6 +178,9 @@ struct State {
     /// Seat and serial of the last pointer button press, for `move`.
     last_button: Option<(WlSeat, u32)>,
     pointer_on_surface: bool,
+    /// `--frame-paced`: a frame callback is outstanding, and a configure arrived meanwhile.
+    frame_pending: bool,
+    needs_redraw: bool,
 }
 
 impl State {
@@ -190,7 +200,7 @@ impl State {
             .unwrap_or_else(|| format!("unknown-{}", id.protocol_id()))
     }
 
-    fn draw(&self, qh: &QueueHandle<Self>) {
+    fn draw(&mut self, qh: &QueueHandle<Self>) {
         let (width, height) = self.size.unwrap();
         let window = self.window.as_ref().unwrap();
         let stride = width.checked_mul(4).filter(|s| *s <= i32::MAX as u32);
@@ -224,6 +234,10 @@ impl State {
 
         window.surface.attach(Some(&buffer), 0, 0);
         window.surface.damage_buffer(0, 0, i32::MAX, i32::MAX);
+        if self.args().frame_paced {
+            window.surface.frame(qh, FrameCallback);
+            self.frame_pending = true;
+        }
         window.surface.commit();
     }
 
@@ -604,7 +618,11 @@ impl Dispatch<XdgSurface, ()> for State {
         let first = state.size.is_none();
         state.size = Some((width, height));
         xdg_surface.ack_configure(serial);
-        state.draw(qh);
+        if state.frame_pending {
+            state.needs_redraw = true;
+        } else {
+            state.draw(qh);
+        }
         if first {
             emit(json!({"event": "ready", "width": width, "height": height}));
         }
@@ -772,3 +790,26 @@ delegate_noop!(State: WlCompositor);
 delegate_noop!(State: WlShmPool);
 delegate_noop!(State: ignore WlShm);
 delegate_noop!(State: ZxdgDecorationManagerV1);
+
+/// User data of frame callbacks, to tell them from `sync` callbacks.
+struct FrameCallback;
+
+impl Dispatch<WlCallback, FrameCallback> for State {
+    fn event(
+        state: &mut Self,
+        _: &WlCallback,
+        event: wl_callback::Event,
+        _: &FrameCallback,
+        _: &Connection,
+        qh: &QueueHandle<Self>,
+    ) {
+        if let wl_callback::Event::Done { .. } = event {
+            state.frame_pending = false;
+            emit(json!({"event": "frame"}));
+            if state.needs_redraw {
+                state.needs_redraw = false;
+                state.draw(qh);
+            }
+        }
+    }
+}

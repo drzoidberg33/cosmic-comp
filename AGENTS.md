@@ -115,10 +115,15 @@ How it works:
   outputs from `COSMIC_HEADLESS_OUTPUTS` (`WxH[@scale][+X+Y]`, comma separated), rendered offscreen
   with EGL on the first hardware render node (or llvmpipe with `COSMIC_HEADLESS_SOFTWARE=1`).
   Synthetic input goes through the normal `process_input_event` path via a `HeadlessInput`
-  `InputBackend`.
+  `InputBackend`. **Like KMS, it only renders what the compositor schedules.** Unlike the
+  nested backends, it doesn't redraw every output on every input event, so missing redraws
+  show up in tests: this once hid that spanning windows' commits didn't redraw the other
+  output.
 - **Control socket** (`src/backend/headless/control.rs`, path in `COSMIC_HEADLESS_CONTROL`):
   JSON lines. Commands:
-  - `outputs`, `windows`, `pointer`;
+  - `outputs` (including `renders`, a per-output render counter for asserting that an output
+    gets redrawn), `windows` (including `primary_output`, the output whose renders send the
+    window's frame callbacks), `pointer`;
   - `focus` (debug strings of the pointer and keyboard focus targets, useful to find out what
     a click actually hit);
   - `pointer_motion` (absolute, warps), `pointer_motion_relative` (like a mouse: the relative
@@ -132,7 +137,11 @@ How it works:
 - **`test-client`** (`test-harness/src/bin/test-client.rs`): a solid-colour xdg_toplevel. It
   reports `configure`, `ready`, `enter`/`leave` (output names), `preferred_buffer_scale`,
   `decoration`, pointer and keyboard events as JSON lines, and accepts `move`, `set_color`,
-  `sync` and `quit` on stdin. The module docs list the exact protocol.
+  `sync` and `quit` on stdin. The module docs list the exact protocol. **`--frame-paced`**
+  makes it behave like a GPU toolkit: it only draws again after the previous frame's
+  callback, and reports `frame` events. Use it for anything about smoothness or frame
+  pacing. The default mode redraws immediately on every configure, which hides frame
+  callback stalls.
 - **Library** (`test-harness/src/lib.rs`):
   - `Compositor::start(Options)` gives every compositor its own runtime, config and state dirs
     under `$XDG_RUNTIME_DIR/cosmic-comp-test/`, disables the session bus and runs
