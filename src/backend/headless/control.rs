@@ -9,8 +9,9 @@
 //! - `{"cmd":"outputs"}` → `outputs: [{name, x, y, width, height, scale, renders}]`, `renders`
 //!   counting renders of the output so far
 //! - `{"cmd":"windows"}` → `windows: [{title, app_id, x, y, width, height, output, workspace,
-//!   active_workspace, floating, maximized, primary_output}]`. `primary_output` is the output
-//!   whose renders send the window its frame callbacks.
+//!   active_workspace, floating, maximized, primary_output, stacking}]`. `primary_output` is the
+//!   output whose renders send the window its frame callbacks; `stacking` increases with every
+//!   raise, across outputs.
 //! - `{"cmd":"pointer"}` → `x, y` of the pointer
 //! - `{"cmd":"focus"}` → `pointer`, `keyboard`: debug descriptions of the current focus targets
 //! - `{"cmd":"pointer_motion","x":F,"y":F}`: absolute, warps the pointer
@@ -285,6 +286,7 @@ fn execute(command: Command, state: &mut State) -> Result<Value> {
                         });
                         windows.push(json!({
                             "primary_output": primary_output,
+                            "stacking": mapped.stacking(),
                             "title": window.title(),
                             "app_id": window.app_id(),
                             "x": geometry.loc.x,

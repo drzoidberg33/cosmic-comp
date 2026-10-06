@@ -155,11 +155,11 @@ How it works:
 - **`test-client`** (`test-harness/src/bin/test-client.rs`): a solid-colour xdg_toplevel. It
   reports `configure`, `ready`, `enter`/`leave` (output names), `preferred_buffer_scale`,
   `decoration`, pointer and keyboard events as JSON lines, and accepts `move`, `set_color`,
-  `sync` and `quit` on stdin. The module docs list the exact protocol. **`--frame-paced`**
-  makes it behave like a GPU toolkit: it only draws again after the previous frame's
-  callback, and reports `frame` events. Use it for anything about smoothness or frame
-  pacing. The default mode redraws immediately on every configure, which hides frame
-  callback stalls.
+  `set_size` (the client resizes itself, without a configure), `sync` and `quit` on stdin.
+  The module docs list the exact protocol. **`--frame-paced`** makes it behave like a GPU
+  toolkit: it only draws again after the previous frame's callback, and reports `frame`
+  events. Use it for anything about smoothness or frame pacing. The default mode redraws
+  immediately on every configure, which hides frame callback stalls.
 - **Library** (`test-harness/src/lib.rs`):
   - `Compositor::start(Options)` gives every compositor its own runtime, config and state dirs
     under `$XDG_RUNTIME_DIR/cosmic-comp-test/`, disables the session bus and runs
@@ -177,8 +177,10 @@ How it works:
     `Options::binary` picks the compositor build. System defaults (e.g. shortcuts from
     `/usr/share/cosmic`) still apply.
   - Helpers:
-    - `spawn_client`, `windows`/`wait_window`;
-    - `drag`/`drag_window_to` (real title-bar drags), `pointer_relative` and
+    - `spawn_client`, `windows`/`wait_window` (`WindowInfo::stacking` tells which of two
+      overlapping floating windows is on top);
+    - `click` (waits out the double-click gap after the last release),
+      `drag`/`drag_window_to` (real title-bar drags), `pointer_relative` and
       `drag_relative`. **Use relative motion for anything that depends on how a real mouse
       moves between outputs**, e.g. grabs crossing outputs: on KMS the pointer moves
       relatively, and that path has its own clamping and grab logic that absolute motion
@@ -386,6 +388,21 @@ other outputs, those outputs draw and hit-test them as well. Tests are in
   - `workspace_elements` (render),
   - `State::element_under`,
   - `State::surface_under`.
+- **Stacking numbers:** each floating layer keeps its own stacking order (the smithay
+  `Space`'s element order), which says nothing about windows of different layers.
+  `CosmicMapped::stacking()` does: a global counter, bumped whenever a window goes on top
+  of its layer.
+  - **Invariant:** within a layer, stacking numbers increase from bottom to top (per smithay
+    `z_index` group, which `Space` sorts by first). `FloatingLayout::refresh` checks it with a
+    `debug_assert!`, so tests (dev-opt builds) catch violations.
+  - **How to keep it:** change the order only through `FloatingLayout::map_on_top` and
+    `FloatingLayout::raise`, never `space.map_element`/`raise_element` directly. The
+    exception is `FloatingLayout::recalculate`, which re-maps every element bottom to top
+    and so keeps the order. Resize grabs re-map the window on every commit, which raises it
+    (upstream behaviour).
+  - **Moving between layers:** a window moved to another output's layer without being
+    raised (re-homing) keeps its number; `FloatingLayout::restack` puts it back in place
+    instead of on top. `stacking.rs` tests both.
 - **Rendering:** `FloatingLayout::render_on(target, ...)` renders the layout for any output.
   It offsets positions by `home.loc - target.loc` and uses the target's scale.
   `FloatingLayout::render` is `render_on(home)`. The resize indicator only draws on the home

@@ -404,8 +404,7 @@ impl FloatingLayout {
         {
             state.original_snapped = Some(snapped);
         };
-        self.space
-            .map_element(mapped, geometry.loc.as_logical(), true);
+        self.map_on_top(mapped, geometry.loc.as_logical(), true);
         self.space.refresh();
     }
 
@@ -620,7 +619,7 @@ impl FloatingLayout {
                 },
             );
         }
-        self.space.map_element(mapped, position.as_logical(), false);
+        self.map_on_top(mapped, position.as_logical(), false);
         self.space.refresh();
     }
 
@@ -650,8 +649,7 @@ impl FloatingLayout {
             ));
         }
 
-        self.space
-            .map_element(mapped.clone(), position.as_logical(), true);
+        self.map_on_top(mapped.clone(), position.as_logical(), true);
         self.space.refresh();
         let target_geometry = self.space.element_geometry(&mapped).unwrap().as_local();
 
@@ -1105,7 +1103,7 @@ impl FloatingLayout {
                 }
                 self.map(window, None);
             }
-            self.space.map_element(mapped.clone(), location, false);
+            self.map_on_top(mapped.clone(), location, false);
             self.space.refresh();
 
             for elem in new_elements.into_iter().rev() {
@@ -1385,6 +1383,7 @@ impl FloatingLayout {
 
             let is_activated = mapped.is_activated(false);
             mapped.configure();
+            // Re-mapping every element bottom to top keeps the stacking order.
             self.space
                 .map_element(mapped, window_geometry.loc.as_logical(), is_activated);
         }
@@ -1418,6 +1417,10 @@ impl FloatingLayout {
             *element.last_geometry.lock().unwrap() = None;
             self.map_internal(element, None, None, None);
         }
+        debug_assert!(
+            self.stacking_is_consistent(),
+            "floating stacking order and CosmicMapped::stacking disagree"
+        );
     }
 
     /// Whether any window of this layout reaches onto `output`, which may be another output than
@@ -1440,6 +1443,44 @@ impl FloatingLayout {
                     geometry.loc += home.loc;
                     !home.contains_rect(geometry) && geometry.overlaps(target)
                 })
+        })
+    }
+
+    /// Maps `mapped` on top of the layer. Everything changing the stacking order goes through
+    /// this or [`FloatingLayout::raise`], which keep [`CosmicMapped::stacking`] in step.
+    fn map_on_top(&mut self, mapped: CosmicMapped, location: Point<i32, Logical>, activate: bool) {
+        mapped.bump_stacking();
+        self.space.map_element(mapped, location, activate);
+    }
+
+    /// Raises `mapped` to the top of the layer.
+    pub fn raise(&mut self, mapped: &CosmicMapped, activate: bool) {
+        mapped.bump_stacking();
+        self.space.raise_element(mapped, activate);
+    }
+
+    /// Moves `mapped`, mapped on top, down to where `stacking` places it among the layer's
+    /// other windows, e.g. for a window moving here from another output's layer.
+    pub(in crate::shell) fn restack(&mut self, mapped: &CosmicMapped, stacking: u64) {
+        mapped.set_stacking(stacking);
+        let below = self
+            .space
+            .elements()
+            .filter(|e| *e != mapped && e.z_index() == mapped.z_index() && e.stacking() < stacking)
+            .max_by_key(|e| e.stacking())
+            .cloned();
+        match below {
+            Some(below) => self.space.raise_element_above(mapped, &below, false),
+            None => self.space.lower_element(mapped),
+        }
+    }
+
+    /// Whether the stacking order agrees with [`CosmicMapped::stacking`].
+    fn stacking_is_consistent(&self) -> bool {
+        let mut elements = self.space.elements().collect::<Vec<_>>();
+        elements.sort_by_key(|e| e.z_index());
+        elements.windows(2).all(|pair| {
+            pair[0].z_index() != pair[1].z_index() || pair[0].stacking() < pair[1].stacking()
         })
     }
 

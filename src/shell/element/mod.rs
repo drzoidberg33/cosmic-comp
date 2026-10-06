@@ -45,7 +45,10 @@ use std::{
     borrow::Cow,
     fmt,
     hash::Hash,
-    sync::{Arc, Mutex, Weak, atomic::AtomicBool},
+    sync::{
+        Arc, Mutex, Weak,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
 };
 
 pub mod surface;
@@ -106,6 +109,9 @@ pub struct CosmicMapped {
     pub last_geometry: Arc<Mutex<Option<Rectangle<i32, Local>>>>,
     pub moved_since_mapped: Arc<AtomicBool>,
     pub floating_tiled: Arc<Mutex<Option<TiledCorners>>>,
+    /// Fork-only: when the window was last raised, to stack floating windows of different
+    /// outputs against each other where they overlap (see `CosmicMapped::stacking`).
+    stacking: Arc<AtomicU64>,
     //sticky
     pub previous_layer: Arc<Mutex<Option<ManagedLayer>>>,
 
@@ -196,7 +202,31 @@ impl Hash for CosmicMapped {
     }
 }
 
+/// Fork-only: a global counter, so floating windows of different outputs can be stacked
+/// against each other where one reaches onto the other's output.
+static STACKING: AtomicU64 = AtomicU64::new(0);
+
+fn next_stacking() -> u64 {
+    STACKING.fetch_add(1, Ordering::Relaxed) + 1
+}
+
 impl CosmicMapped {
+    /// Fork-only: when the window was last put on top of its floating layer. Floating layers
+    /// keep their own stacking order; this orders windows of different layers against each
+    /// other, and within a layer it increases from bottom to top.
+    pub fn stacking(&self) -> u64 {
+        self.stacking.load(Ordering::Relaxed)
+    }
+
+    /// Marks the window as the topmost one, after it was raised or mapped on top.
+    pub(super) fn bump_stacking(&self) {
+        self.stacking.store(next_stacking(), Ordering::Relaxed);
+    }
+
+    pub(super) fn set_stacking(&self, stacking: u64) {
+        self.stacking.store(stacking, Ordering::Relaxed);
+    }
+
     pub fn windows(&self) -> impl Iterator<Item = (CosmicSurface, Point<i32, Logical>)> + '_ {
         match &self.element {
             CosmicMappedInternal::Stack(stack) => {
@@ -1075,6 +1105,7 @@ impl From<CosmicWindow> for CosmicMapped {
             last_geometry: Arc::new(Mutex::new(None)),
             moved_since_mapped: Arc::new(AtomicBool::new(false)),
             floating_tiled: Arc::new(Mutex::new(None)),
+            stacking: Arc::new(AtomicU64::new(next_stacking())),
             previous_layer: Arc::new(Mutex::new(None)),
             #[cfg(feature = "debug")]
             debug: Arc::new(Mutex::new(None)),
@@ -1092,6 +1123,7 @@ impl From<CosmicStack> for CosmicMapped {
             last_geometry: Arc::new(Mutex::new(None)),
             moved_since_mapped: Arc::new(AtomicBool::new(false)),
             floating_tiled: Arc::new(Mutex::new(None)),
+            stacking: Arc::new(AtomicU64::new(next_stacking())),
             previous_layer: Arc::new(Mutex::new(None)),
             #[cfg(feature = "debug")]
             debug: Arc::new(Mutex::new(None)),

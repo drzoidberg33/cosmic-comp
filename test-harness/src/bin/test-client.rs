@@ -142,6 +142,7 @@ fn parse_args() -> Result<Args, String> {
 enum Command {
     Move,
     SetColor { color: String },
+    SetSize { width: u32, height: u32 },
     Sync,
     Quit,
 }
@@ -271,6 +272,13 @@ impl State {
                 if self.size.is_some() {
                     self.draw(qh);
                 }
+                emit(json!({"event": "redrawn"}));
+            }
+            Command::SetSize { width, height } => {
+                // Floating windows may pick their own size; this one shrinks or grows by itself,
+                // without a configure.
+                self.size = Some((width, height));
+                self.draw(qh);
                 emit(json!({"event": "redrawn"}));
             }
             Command::Sync => {

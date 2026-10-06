@@ -217,10 +217,7 @@ impl State {
             }
 
             let current_workspace = shell.active_space_mut(&current_output).unwrap();
-            current_workspace
-                .floating_layer
-                .space
-                .raise_element(&element, true);
+            current_workspace.floating_layer.raise(&element, true);
             if element.is_stack() {
                 if let Some((window, _)) = element.windows().find(|(window, _)| {
                     let mut found = false;

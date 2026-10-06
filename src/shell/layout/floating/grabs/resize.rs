@@ -657,7 +657,7 @@ impl ResizeSurfaceGrab {
                         }
                     }
                 }
-                floating_layer.space.map_element(
+                floating_layer.map_on_top(
                     window,
                     new_location.to_local(output).as_logical(),
                     false,

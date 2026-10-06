@@ -185,6 +185,9 @@ pub struct WindowInfo {
     pub maximized: bool,
     /// The output whose renders send the window its frame callbacks.
     pub primary_output: Option<String>,
+    /// Increases every time a window is raised, across outputs: of two overlapping floating
+    /// windows, the one with the higher value is on top.
+    pub stacking: u64,
 }
 
 impl WindowInfo {
@@ -374,6 +377,7 @@ impl Compositor {
                 floating: w["floating"].as_bool().unwrap_or_default(),
                 maximized: w["maximized"].as_bool().unwrap_or_default(),
                 primary_output: w["primary_output"].as_str().map(str::to_string),
+                stacking: w["stacking"].as_u64().unwrap_or_default(),
             })
             .collect())
     }
@@ -429,6 +433,17 @@ impl Compositor {
             self.last_release = Some(Instant::now());
         }
         Ok(())
+    }
+
+    /// Left click at `at`, far enough from the last release not to count as a double click.
+    pub fn click(&mut self, at: (f64, f64)) -> Result<()> {
+        if let Some(elapsed) = self.last_release.map(|t| t.elapsed()) {
+            thread::sleep(Duration::from_millis(400).saturating_sub(elapsed));
+        }
+        self.pointer_motion(at)?;
+        self.button("left", true)?;
+        self.button("left", false)?;
+        self.request(json!({"cmd": "sync"})).map(|_| ())
     }
 
     pub fn key(&mut self, key: u32, pressed: bool) -> Result<()> {

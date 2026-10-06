@@ -469,7 +469,7 @@ fn update_focus_state(
 
 fn raise_with_children(floating_layer: &mut FloatingLayout, focused: &CosmicMapped) {
     if floating_layer.mapped().any(|m| m == focused) {
-        floating_layer.space.raise_element(focused, true);
+        floating_layer.raise(focused, true);
         for element in floating_layer
             .space
             .elements()

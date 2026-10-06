@@ -2704,12 +2704,15 @@ impl Shell {
             }
 
             let to_workspace = self.workspaces.space_for_handle_mut(&to).unwrap();
+            let stacking = mapped.stacking();
             to_workspace.floating_layer.map_internal(
                 mapped.clone(),
                 Some(location.to_local(&to_output)),
                 None,
                 None,
             );
+            // Already shown on this output: keep its place among the windows here.
+            to_workspace.floating_layer.restack(&mapped, stacking);
             for seat in &focused_seats {
                 to_workspace
                     .focus_stack
