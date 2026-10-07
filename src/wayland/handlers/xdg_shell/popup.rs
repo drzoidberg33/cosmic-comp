@@ -65,6 +65,15 @@ impl Shell {
                         unconstrain_xdg_popup(surface, window_loc, output.geometry());
                     }
                 } else {
+                    // Fork-only: floating windows can reach onto other outputs, which draw
+                    // their popups too. Keep a popup on the output it's opened from rather
+                    // than pushing it back onto the window's own.
+                    let anchor = popup_anchor(surface, window_loc);
+                    let output = self
+                        .outputs()
+                        .filter(|o| o.geometry().overlaps(element_geo))
+                        .find(|o| anchor.is_some_and(|anchor| o.geometry().contains(anchor)))
+                        .unwrap_or(&output);
                     unconstrain_xdg_popup(surface, window_loc, output.geometry());
                 }
             } else if let Some(output) = self.workspaces.spaces().find_map(|w| {
@@ -121,6 +130,16 @@ pub fn update_reactive_popups<'a>(
             PopupKind::InputMethod(_) => {}
         }
     }
+}
+
+/// Fork-only: the global position of `surface`'s anchor point, the point of its parent it opens
+/// from, given the location of its toplevel's window geometry.
+fn popup_anchor(surface: &PopupKind, window_loc: Point<i32, Global>) -> Option<Point<i32, Global>> {
+    let PopupKind::Xdg(popup) = surface else {
+        return None;
+    };
+    let anchor = popup.with_pending_state(|state| state.positioner.get_anchor_point());
+    Some(window_loc + (get_popup_toplevel_coords(surface) + anchor).as_global())
 }
 
 // Attempt to constraint to tile, without resize. Return `true` if it fits.

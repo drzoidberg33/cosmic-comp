@@ -582,6 +582,8 @@ impl ResizeSurfaceGrab {
         if resize_state.is_none() {
             return;
         }
+        // Reactive popups may be on any output the window reaches onto.
+        let outputs = shell.outputs().cloned().collect::<Vec<_>>();
 
         let (output, floating_layer) = if let Some((output, set)) = shell
             .workspaces
@@ -647,7 +649,7 @@ impl ResizeSurfaceGrab {
                             update_reactive_popups(
                                 toplevel,
                                 new_location + offset.as_global(),
-                                floating_layer.space.outputs(),
+                                outputs.iter(),
                             );
                         }
                         WindowSurface::X11(surface) => {

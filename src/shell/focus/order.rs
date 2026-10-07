@@ -49,6 +49,8 @@ pub enum Stage<'a> {
     WorkspacePopups {
         workspace: &'a Workspace,
         offset: Point<i32, Logical>,
+        /// Fork-only: like `Stage::Workspace::reaching`, for those windows' popups.
+        reaching: SmallVec<[&'a Workspace; 2]>,
     },
     /// Floating windows of another output's active workspace that reach onto this output, on
     /// top of the output's own windows. Only while the output switches workspaces; otherwise
@@ -338,6 +340,25 @@ fn render_input_order_internal<R: 'static>(
         callback(Stage::StickyPopups(&set.sticky_layer))?;
     }
 
+    // floating windows of other outputs reaching onto this one
+    let mut reaching = SmallVec::<[&Workspace; 2]>::new();
+    if element_filter != ElementFilter::LayerShellOnly && !has_fullscreen {
+        for (other, other_set) in shell.workspaces.sets.iter() {
+            if other == output {
+                continue;
+            }
+            let workspace = &other_set.workspaces[other_set.active];
+            if workspace.spans_onto(output, seat) {
+                reaching.push(workspace);
+            }
+        }
+    }
+    let sliding_reaching = if previous.is_some() {
+        std::mem::take(&mut reaching)
+    } else {
+        SmallVec::new()
+    };
+
     if element_filter != ElementFilter::LayerShellOnly {
         // previous workspace popups
         if let Some((previous_handle, _, _, offset)) = previous.as_ref() {
@@ -348,6 +369,7 @@ fn render_input_order_internal<R: 'static>(
             callback(Stage::WorkspacePopups {
                 workspace,
                 offset: *offset,
+                reaching: SmallVec::new(),
             })?;
         }
 
@@ -359,6 +381,7 @@ fn render_input_order_internal<R: 'static>(
         callback(Stage::WorkspacePopups {
             workspace,
             offset: current_offset,
+            reaching: reaching.clone(),
         })?;
     }
 
@@ -430,24 +453,10 @@ fn render_input_order_internal<R: 'static>(
         callback(Stage::Sticky(&set.sticky_layer))?;
     }
 
-    // floating windows of other outputs reaching onto this one
-    let mut reaching = SmallVec::new();
-    if element_filter != ElementFilter::LayerShellOnly && !has_fullscreen {
-        for (other, other_set) in shell.workspaces.sets.iter() {
-            if other == output {
-                continue;
-            }
-            let workspace = &other_set.workspaces[other_set.active];
-            if workspace.spans_onto(output, seat) {
-                reaching.push(workspace);
-            }
-        }
-    }
-    // While this output's workspaces slide, they don't belong with either; keep them on top.
-    if previous.is_some() {
-        for workspace in reaching.drain(..) {
-            callback(Stage::SpanningWorkspace(workspace))?;
-        }
+    // While this output's workspaces slide, windows of other outputs reaching onto it don't
+    // belong with either; keep them on top.
+    for workspace in sliding_reaching {
+        callback(Stage::SpanningWorkspace(workspace))?;
     }
 
     if element_filter != ElementFilter::LayerShellOnly {

@@ -18,7 +18,10 @@ use smithay::{
             utils::{Relocate, RelocateRenderElement, RescaleRenderElement},
         },
     },
-    desktop::{PopupKind, Space, WindowSurfaceType, layer_map_for_output, space::SpaceElement},
+    desktop::{
+        PopupKind, PopupManager, Space, WindowSurfaceType, layer_map_for_output,
+        space::SpaceElement,
+    },
     input::Seat,
     output::Output,
     utils::{IsAlive, Logical, Point, Rectangle, Scale, Size},
@@ -51,6 +54,12 @@ pub use self::grabs::*;
 
 pub const ANIMATION_DURATION: Duration = Duration::from_millis(200);
 pub const MINIMIZE_ANIMATION_DURATION: Duration = Duration::from_millis(320);
+
+/// Fork-only: a window's toplevel surfaces for [`FloatingLayout::surface_under_element`].
+pub const TOPLEVELS: WindowSurfaceType =
+    WindowSurfaceType::TOPLEVEL.union(WindowSurfaceType::SUBSURFACE);
+/// Fork-only: a window's popups for [`FloatingLayout::surface_under_element`].
+pub const POPUPS: WindowSurfaceType = WindowSurfaceType::POPUP.union(WindowSurfaceType::SUBSURFACE);
 
 #[derive(Debug, Default)]
 pub struct FloatingLayout {
@@ -756,32 +765,11 @@ impl FloatingLayout {
         self.space
             .elements()
             .rev()
-            .map(|e| {
-                (
-                    e,
-                    self.space.element_location(e).unwrap() - e.geometry().loc,
-                )
+            .find(|e| {
+                self.surface_under_element(e, location, POPUPS, seat)
+                    .is_some()
             })
-            .filter(|(e, render_location)| {
-                let mut bbox = e.bbox();
-                bbox.loc += *render_location;
-                bbox.to_f64().contains(location.as_logical())
-            })
-            .find_map(|(e, render_location)| {
-                let render_location = render_location.as_local().to_f64();
-                let point = location - render_location;
-                if e.focus_under(
-                    point.as_logical(),
-                    WindowSurfaceType::POPUP | WindowSurfaceType::SUBSURFACE,
-                    seat,
-                )
-                .is_some()
-                {
-                    Some(e.clone().into())
-                } else {
-                    None
-                }
-            })
+            .map(|e| e.clone().into())
     }
 
     pub fn toplevel_element_under(
@@ -793,7 +781,7 @@ impl FloatingLayout {
             .elements()
             .rev()
             .find(|e| {
-                self.toplevel_surface_under_element(e, location, seat)
+                self.surface_under_element(e, location, TOPLEVELS, seat)
                     .is_some()
             })
             .map(|e| e.clone().into())
@@ -807,29 +795,7 @@ impl FloatingLayout {
         self.space
             .elements()
             .rev()
-            .map(|e| {
-                (
-                    e,
-                    self.space.element_location(e).unwrap() - e.geometry().loc,
-                )
-            })
-            .filter(|(e, render_location)| {
-                let mut bbox = e.bbox();
-                bbox.loc += *render_location;
-                bbox.to_f64().contains(location.as_logical())
-            })
-            .find_map(|(e, render_location)| {
-                let render_location = render_location.as_local().to_f64();
-                let point = location - render_location;
-                e.focus_under(
-                    point.as_logical(),
-                    WindowSurfaceType::POPUP | WindowSurfaceType::SUBSURFACE,
-                    seat,
-                )
-                .map(|(surface, surface_offset)| {
-                    (surface, render_location + surface_offset.as_local())
-                })
-            })
+            .find_map(|e| self.surface_under_element(e, location, POPUPS, seat))
     }
 
     pub fn toplevel_surface_under(
@@ -840,15 +806,16 @@ impl FloatingLayout {
         self.space
             .elements()
             .rev()
-            .find_map(|e| self.toplevel_surface_under_element(e, location, seat))
+            .find_map(|e| self.surface_under_element(e, location, TOPLEVELS, seat))
     }
 
-    /// The toplevel surface (or a subsurface) of `e`, one of this layout's windows, under
-    /// `location` in this layout's local coordinates, with its location.
-    pub fn toplevel_surface_under_element(
+    /// The surface of `e`, one of this layout's windows, of `surface_type` ([`TOPLEVELS`] or
+    /// [`POPUPS`]) under `location` in this layout's local coordinates, with its location.
+    pub fn surface_under_element(
         &self,
         e: &CosmicMapped,
         location: Point<f64, Local>,
+        surface_type: WindowSurfaceType,
         seat: &Seat<State>,
     ) -> Option<(PointerFocusTarget, Point<f64, Local>)> {
         let render_location = self.space.element_location(e)? - e.geometry().loc;
@@ -860,7 +827,7 @@ impl FloatingLayout {
         let render_location = render_location.as_local().to_f64();
         e.focus_under(
             (location - render_location).as_logical(),
-            WindowSurfaceType::TOPLEVEL | WindowSurfaceType::SUBSURFACE,
+            surface_type,
             seat,
         )
         .map(|(surface, surface_offset)| (surface, render_location + surface_offset.as_local()))
@@ -1581,33 +1548,53 @@ impl FloatingLayout {
         CosmicStackRenderElement<R>: RenderElement<R>,
     {
         let output = self.space.outputs().next().unwrap();
-        let output_scale = output.current_scale().fractional_scale();
-
-        for elem in self
-            .animations
-            .iter()
-            .filter(|(_, anim)| matches!(anim, Animation::Minimize { .. }))
-            .map(|(elem, _)| elem)
-            .chain(self.space.elements().rev())
-        {
-            let (geometry, alpha) = self
-                .animations
-                .get(elem)
-                .map(|anim| (*anim.previous_geometry(), alpha * anim.alpha()))
-                .unwrap_or_else(|| (self.space.element_geometry(elem).unwrap().as_local(), alpha));
-
-            let render_location = geometry.loc - elem.geometry().loc.as_local();
-            elem.push_popup_render_elements(
+        let render_target = self.render_target(output);
+        for elem in self.render_order() {
+            self.render_element_popups_on(
                 renderer,
-                render_location
-                    .as_logical()
-                    .to_physical_precise_round(output_scale),
-                output_scale.into(),
+                elem,
+                &render_target,
                 alpha,
                 scanout_node,
                 push,
             );
         }
+    }
+
+    /// Renders the popups of `elem`, one of [`FloatingLayout::render_order`], for `target`,
+    /// which may be another output than the layout's own.
+    pub fn render_element_popups_on<R>(
+        &self,
+        renderer: &mut R,
+        elem: &CosmicMapped,
+        target: &FloatingRenderTarget,
+        alpha: f32,
+        scanout_node: Option<DrmNode>,
+        push: &mut dyn FnMut(CosmicMappedRenderElement<R>),
+    ) where
+        R: AsGlowRenderer,
+        R::TextureId: Send + Clone + 'static,
+        CosmicMappedRenderElement<R>: RenderElement<R>,
+        CosmicWindowRenderElement<R>: RenderElement<R>,
+        CosmicStackRenderElement<R>: RenderElement<R>,
+    {
+        let (geometry, alpha) = self
+            .animations
+            .get(elem)
+            .map(|anim| (*anim.previous_geometry(), alpha * anim.alpha()))
+            .unwrap_or_else(|| (self.space.element_geometry(elem).unwrap().as_local(), alpha));
+
+        let render_location = geometry.loc + target.offset - elem.geometry().loc.as_local();
+        elem.push_popup_render_elements(
+            renderer,
+            render_location
+                .as_logical()
+                .to_physical_precise_round(target.scale),
+            target.scale.into(),
+            alpha,
+            scanout_node,
+            push,
+        );
     }
 
     #[profiling::function]
@@ -1685,6 +1672,18 @@ impl FloatingLayout {
     /// minimize animation, then the stacking order.
     pub fn render_order(&self) -> impl Iterator<Item = &CosmicMapped> {
         self.minimizing().chain(self.space.elements().rev())
+    }
+
+    /// Fork-only: whether any window of this layer has a popup open. Cheaper than finding
+    /// popups under a point, and usually false.
+    pub fn has_popups(&self) -> bool {
+        self.space.elements().any(|mapped| {
+            mapped.windows().any(|(window, _)| {
+                window.wl_surface().is_some_and(|surface| {
+                    PopupManager::popups_for_surface(&surface).next().is_some()
+                })
+            })
+        })
     }
 
     /// Windows playing their minimize animation, no longer in the stacking order.

@@ -414,8 +414,8 @@ other outputs, those outputs draw and hit-test them as well. Tests are in
   - **How to keep it:** change the order only through `FloatingLayout::map_on_top` and
     `FloatingLayout::raise`, never `space.map_element`/`raise_element` directly. The
     exception is `FloatingLayout::recalculate`, which re-maps every element bottom to top
-    and so keeps the order. Resize grabs re-map the window on every commit, which raises it
-    (upstream behaviour).
+    and so keeps the order. Resize grabs re-map the window on commits that move its top or
+    left edge, which raises it (upstream behaviour).
   - **Moving between layers:** a window moved to another output's layer without being
     raised (re-homing) keeps its number; `FloatingLayout::restack` puts it back in place
     instead of on top. `stacking.rs` tests both.
@@ -428,6 +428,27 @@ other outputs, those outputs draw and hit-test them as well. Tests are in
 - **Hit-testing:** the floating layer's `toplevel_*_under` take home-local coordinates and
   don't bounds-check, so global positions on other outputs are converted with
   `to_local(home)`. `Workspace::*_under` do bounds-check against their own output.
+  `FloatingLayout::surface_under_element(e, location, TOPLEVELS | POPUPS, seat)` tests one
+  window, for walking several layers' windows in stacking order.
+- **Popups:** `Shell::unconstrain_popup` keeps a floating window's popup within the output
+  under its anchor point (where it opens from), among the outputs the window overlaps,
+  instead of the window's own output. The positioner protocol only takes one rectangle, so
+  a menu opened at the seam stays on the output it was opened on.
+  - `Stage::WorkspacePopups { reaching, .. }` carries the same workspaces as
+    `Stage::Workspace`, so `Workspace::render_popups` and `Workspace::popup_*_under` draw
+    and hit-test the popups of windows reaching onto the output, above all its windows like
+    its own popups. While the output's workspaces slide they're left out.
+  - **Cost:** only workspaces with a popup open (`FloatingLayout::has_popups`) take part,
+    so without menus open the popup paths stay single-layer. Merging them unconditionally
+    pushed a pointer lookup in the 4-output benchmark past its +5µs budget.
+  - **Hit-testing matters most:** a menu with a grab is dismissed by any click the
+    compositor doesn't find on one of the client's surfaces, so a menu drawn but not
+    hit-tested on another output closed when you clicked an item.
+  - Frame callbacks, commit redraws and `wl_surface.enter`/`leave` already cover popups:
+    they go through the window (smithay passes the window's output overlap to its popups).
+  - Reactive popups are repositioned against every output, also during resize grabs.
+  - X11 menus are override-redirect windows in global coordinates and already worked.
+  - **Tests:** `popups.rs`.
 - **Resizing:** upstream drops relative pointer motion onto another output while a floating
   resize grab is active (`ResizeGrabMarker`), because windows used to be confined to one
   output. That check is removed in `process_input_event`, so resizes follow the pointer
@@ -501,7 +522,6 @@ other outputs, those outputs draw and hit-test them as well. Tests are in
     pointer event.
 - **Known limitations:**
   - Only floating windows span; tiled, maximized, fullscreen and sticky windows don't.
-  - Popups (menus) of a spanning window aren't drawn or hit-tested on other outputs yet.
   - The overhang doesn't follow the home output's workspace-switch animation; it pops.
   - Foreign-toplevel output membership (panels and docks) is still the home output only.
 

@@ -7,7 +7,7 @@ use crate::{
     shell::{
         ANIMATION_DURATION, OverviewMode, SeatMoveGrabState,
         layout::{
-            floating::{FloatingLayout, TiledCorners},
+            floating::{FloatingLayout, POPUPS, TOPLEVELS, TiledCorners},
             tiling::TilingLayout,
         },
     },
@@ -780,14 +780,17 @@ impl Workspace {
             .find(|e| e.windows().any(|(w, _)| &w == surface))
     }
 
+    /// `reaching`: see [`Workspace::toplevel_element_under`], for those windows' popups.
     pub fn popup_element_under(
         &self,
         location: Point<f64, Global>,
+        reaching: &[&Workspace],
         seat: &Seat<State>,
     ) -> Option<KeyboardFocusTarget> {
         if !self.output.geometry().contains(location.to_i32_floor()) {
             return None;
         }
+        let global = location;
         let location = location.to_local(&self.output);
 
         let fullscreen_element_under =
@@ -815,8 +818,14 @@ impl Workspace {
             return fullscreen_element_under(fullscreen, geometry);
         }
 
-        self.floating_layer
-            .popup_element_under(location, seat)
+        let reaching = &with_popups(reaching)[..];
+        let floating = if reaching.is_empty() {
+            self.floating_layer.popup_element_under(location, seat)
+        } else {
+            self.floating_surface_under(global, reaching, POPUPS, seat)
+                .map(|(mapped, _)| mapped.clone().into())
+        };
+        floating
             .or_else(|| self.tiling_layer.popup_element_under(location, seat))
             .or_else(|| {
                 if last_focused.is_none_or(|t| !matches!(t, FocusTarget::Fullscreen(_)))
@@ -871,7 +880,7 @@ impl Workspace {
         let floating = if reaching.is_empty() {
             self.floating_layer.toplevel_element_under(location, seat)
         } else {
-            self.floating_toplevel_under(global, reaching, seat)
+            self.floating_surface_under(global, reaching, TOPLEVELS, seat)
                 .map(|(mapped, _)| mapped.clone().into())
         };
         floating
@@ -887,16 +896,28 @@ impl Workspace {
             })
     }
 
+    /// `reaching`: see [`Workspace::popup_element_under`].
     pub fn popup_surface_under(
         &self,
         location: Point<f64, Global>,
+        reaching: &[&Workspace],
         overview: OverviewMode,
         seat: &Seat<State>,
     ) -> Option<(PointerFocusTarget, Point<f64, Global>)> {
         if !self.output.geometry().contains(location.to_i32_floor()) {
             return None;
         }
+        let global = location;
         let location = location.to_local(&self.output);
+        let reaching = &with_popups(reaching)[..];
+        let floating_under = || {
+            if reaching.is_empty() {
+                self.floating_layer.popup_surface_under(location, seat)
+            } else {
+                self.floating_surface_under(global, reaching, POPUPS, seat)
+                    .map(|(_, under)| under)
+            }
+        };
 
         let check_fullscreen = |fullscreen: &FullscreenSurface| {
             if !fullscreen.is_animating() {
@@ -928,7 +949,7 @@ impl Workspace {
             .iter()
             .find(|f| last_focused.is_some_and(|t| t == &f.surface))
             .and_then(check_fullscreen)
-            .or_else(|| self.floating_layer.popup_surface_under(location, seat))
+            .or_else(floating_under)
             .or_else(|| {
                 self.tiling_layer
                     .popup_surface_under(location, overview, seat)
@@ -954,7 +975,7 @@ impl Workspace {
             if reaching.is_empty() {
                 self.floating_layer.toplevel_surface_under(location, seat)
             } else {
-                self.floating_toplevel_under(global, reaching, seat)
+                self.floating_surface_under(global, reaching, TOPLEVELS, seat)
                     .map(|(_, under)| under)
             }
         };
@@ -1666,13 +1687,14 @@ impl Workspace {
         stack
     }
 
-    /// The topmost floating window of [`Workspace::floating_stack`] whose toplevel surface (or
-    /// a subsurface) is under `location`, with that surface and its location in this output's
-    /// local coordinates.
-    fn floating_toplevel_under<'a>(
+    /// The topmost floating window of [`Workspace::floating_stack`] with a surface of
+    /// `surface_type` (`TOPLEVELS` or `POPUPS`) under `location`, with that surface and its
+    /// location in this output's local coordinates.
+    fn floating_surface_under<'a>(
         &'a self,
         location: Point<f64, Global>,
         reaching: &[&'a Workspace],
+        surface_type: WindowSurfaceType,
         seat: &Seat<State>,
     ) -> Option<(&'a CosmicMapped, (PointerFocusTarget, Point<f64, Local>))> {
         self.floating_stack(reaching)
@@ -1681,7 +1703,7 @@ impl Workspace {
                 let home = &workspace.output;
                 workspace
                     .floating_layer
-                    .toplevel_surface_under_element(mapped, location.to_local(home), seat)
+                    .surface_under_element(mapped, location.to_local(home), surface_type, seat)
                     .map(|(target, point)| {
                         (
                             mapped,
@@ -2038,10 +2060,13 @@ impl Workspace {
         }
     }
 
+    /// `reaching`: other outputs' workspaces with floating windows reaching onto this output,
+    /// whose popups are rendered here too (see `Stage::WorkspacePopups::reaching`).
     #[profiling::function]
     pub fn render_popups<'a, R>(
         &self,
         renderer: &mut R,
+        reaching: &[&Workspace],
         last_active_seat: &Seat<State>,
         render_focus: bool,
         overview: (OverviewMode, Option<(SwapIndicator, Option<&Tree<Data>>)>),
@@ -2141,8 +2166,41 @@ impl Workspace {
                 OverviewMode::None => 1.0,
             };
 
-            self.floating_layer
-                .render_popups(renderer, alpha, scanout_node, &mut |elem| push(elem.into()));
+            let reaching = &with_popups(reaching)[..];
+            if reaching.is_empty() {
+                self.floating_layer
+                    .render_popups(renderer, alpha, scanout_node, &mut |elem| push(elem.into()));
+            } else {
+                // Fork-only: with the popups of other outputs' windows reaching onto this one,
+                // in the same order as their windows.
+                let layers = std::iter::once(self)
+                    .chain(reaching.iter().copied())
+                    .map(|workspace| {
+                        let target = workspace.floating_layer.render_target(&self.output);
+                        (workspace, target)
+                    })
+                    .collect::<SmallVec<[_; 3]>>();
+                let minimizing = layers.iter().flat_map(|(workspace, _)| {
+                    workspace
+                        .floating_layer
+                        .minimizing()
+                        .map(move |elem| (*workspace, elem))
+                });
+                for (workspace, elem) in minimizing.chain(self.floating_stack(reaching)) {
+                    let (_, target) = layers
+                        .iter()
+                        .find(|(w, _)| std::ptr::eq(*w, workspace))
+                        .unwrap();
+                    workspace.floating_layer.render_element_popups_on(
+                        renderer,
+                        elem,
+                        target,
+                        alpha,
+                        scanout_node,
+                        &mut |elem| push(elem.into()),
+                    );
+                }
+            }
 
             //tiling surfaces
             self.tiling_layer.render_popups(
@@ -2156,6 +2214,16 @@ impl Workspace {
             );
         }
     }
+}
+
+/// Fork-only: those of `reaching` (see `Stage::WorkspacePopups::reaching`) with popups open,
+/// usually none. Without any, popups take the cheaper single-layer paths.
+fn with_popups<'a>(reaching: &[&'a Workspace]) -> SmallVec<[&'a Workspace; 2]> {
+    reaching
+        .iter()
+        .copied()
+        .filter(|workspace| workspace.floating_layer.has_popups())
+        .collect()
 }
 
 impl FocusStacks {
