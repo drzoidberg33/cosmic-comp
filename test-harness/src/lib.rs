@@ -714,6 +714,35 @@ impl Client {
         }
     }
 
+    /// Opens a popup with its top-left corner at `at` in window surface coordinates (below the
+    /// title bar), unless the compositor moves it to fit, and waits until it's drawn. Returns
+    /// where the compositor placed it, in the same coordinates.
+    ///
+    /// With `grab`, it takes an explicit grab with the client's last button press, like menus.
+    pub fn open_popup(
+        &mut self,
+        at: (i32, i32),
+        size: (u32, u32),
+        color: &str,
+        grab: bool,
+    ) -> Result<(i32, i32)> {
+        self.send(json!({
+            "cmd": "popup",
+            "x": at.0,
+            "y": at.1,
+            "width": size.0,
+            "height": size.1,
+            "color": color,
+            "grab": grab,
+        }))?;
+        let configure = self.wait_event("popup_configure", |e| e["event"] == "popup_configure")?;
+        self.wait_event("popup_drawn", |e| e["event"] == "popup_drawn")?;
+        Ok((
+            configure["x"].as_i64().unwrap_or_default() as i32,
+            configure["y"].as_i64().unwrap_or_default() as i32,
+        ))
+    }
+
     /// Round-trips with the compositor, so every event it sent before is recorded.
     pub fn sync(&mut self) -> Result<()> {
         self.send(json!({"cmd": "sync"}))?;

@@ -155,8 +155,11 @@ How it works:
 - **`test-client`** (`test-harness/src/bin/test-client.rs`): a solid-colour xdg_toplevel. It
   reports `configure`, `ready`, `enter`/`leave` (output names), `preferred_buffer_scale`,
   `decoration`, pointer and keyboard events as JSON lines, and accepts `move`, `set_color`,
-  `set_size` (the client resizes itself, without a configure), `sync` and `quit` on stdin.
-  The module docs list the exact protocol. **`--frame-paced`** makes it behave like a GPU
+  `set_size` (the client resizes itself, without a configure), `popup`, `sync` and `quit` on
+  stdin. `popup` opens one solid-colour xdg_popup (sliding to fit, optionally grabbing with
+  the last button press like a menu, optionally reactive) and reports `popup_configure`,
+  `popup_drawn`, `popup_enter`/`popup_leave`, `popup_pointer_*` and `popup_done`;
+  `Client::open_popup` wraps it. The module docs list the exact protocol. **`--frame-paced`** makes it behave like a GPU
   toolkit: it only draws again after the previous frame's callback, and reports `frame`
   events. Use it for anything about smoothness or frame pacing. The default mode redraws
   immediately on every configure, which hides frame callback stalls.

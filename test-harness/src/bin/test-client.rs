@@ -47,6 +47,8 @@ use wayland_protocols::xdg::{
         zxdg_toplevel_decoration_v1::{self, ZxdgToplevelDecorationV1},
     },
     shell::client::{
+        xdg_popup::{self, XdgPopup},
+        xdg_positioner::{self, XdgPositioner},
         xdg_surface::{self, XdgSurface},
         xdg_toplevel::{self, XdgToplevel},
         xdg_wm_base::{self, XdgWmBase},
@@ -143,13 +145,42 @@ enum Command {
     Move,
     SetColor { color: String },
     SetSize { width: u32, height: u32 },
+    /// Opens a popup (replacing any open one) with its top-left corner at `x, y` in window
+    /// surface coordinates, if the compositor doesn't have to move it to fit.
+    Popup {
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+        color: String,
+        /// Take an explicit grab with the last button press, like menus do: the compositor
+        /// then dismisses the popup on clicks outside of this client's surfaces.
+        #[serde(default)]
+        grab: bool,
+        /// Ask to be repositioned when the window moves or resizes.
+        #[serde(default)]
+        reactive: bool,
+    },
     Sync,
     Quit,
 }
 
+struct Popup {
+    surface: WlSurface,
+    xdg_surface: XdgSurface,
+    popup: XdgPopup,
+    color: u32,
+    /// Size from the last configure, drawn on the following xdg_surface configure.
+    size: (u32, u32),
+}
+
+/// User data of the popup's wl_surface and xdg_surface, to tell them from the window's.
+#[derive(Default)]
+struct PopupData;
+
 struct Window {
     surface: WlSurface,
-    _xdg_surface: XdgSurface,
+    xdg_surface: XdgSurface,
     toplevel: XdgToplevel,
     _decoration: Option<ZxdgToplevelDecorationV1>,
 }
@@ -179,6 +210,8 @@ struct State {
     /// Seat and serial of the last pointer button press, for `move`.
     last_button: Option<(WlSeat, u32)>,
     pointer_on_surface: bool,
+    popup: Option<Popup>,
+    pointer_on_popup: bool,
     /// `--frame-paced`: a frame callback is outstanding, and a configure arrived meanwhile.
     frame_pending: bool,
     needs_redraw: bool,
@@ -201,9 +234,30 @@ impl State {
             .unwrap_or_else(|| format!("unknown-{}", id.protocol_id()))
     }
 
+    fn is_popup_surface(&self, surface: &WlSurface) -> bool {
+        self.popup.as_ref().is_some_and(|p| &p.surface == surface)
+    }
+
     fn draw(&mut self, qh: &QueueHandle<Self>) {
         let (width, height) = self.size.unwrap();
-        let window = self.window.as_ref().unwrap();
+        let surface = self.window.as_ref().unwrap().surface.clone();
+        self.attach_buffer(&surface, width, height, self.color, qh);
+        if self.args().frame_paced {
+            surface.frame(qh, FrameCallback);
+            self.frame_pending = true;
+        }
+        surface.commit();
+    }
+
+    /// Attaches a fresh `width`x`height` buffer filled with `color` to `surface`, uncommitted.
+    fn attach_buffer(
+        &self,
+        surface: &WlSurface,
+        width: u32,
+        height: u32,
+        color: u32,
+        qh: &QueueHandle<Self>,
+    ) {
         let stride = width.checked_mul(4).filter(|s| *s <= i32::MAX as u32);
         let len = stride
             .and_then(|s| s.checked_mul(height))
@@ -216,7 +270,7 @@ impl State {
             .unwrap_or_else(|err| fatal(format!("memfd_create: {err}")));
         let mut file = File::from(fd);
         // XRGB8888 is little-endian 0xXXRRGGBB; keep X at 0xff for opacity.
-        let pixel = (0xff00_0000 | self.color).to_le_bytes();
+        let pixel = (0xff00_0000 | color).to_le_bytes();
         file.write_all(&pixel.repeat((width * height) as usize))
             .unwrap_or_else(|err| fatal(format!("writing shm pool: {err}")));
 
@@ -233,13 +287,60 @@ impl State {
         );
         pool.destroy();
 
-        window.surface.attach(Some(&buffer), 0, 0);
-        window.surface.damage_buffer(0, 0, i32::MAX, i32::MAX);
-        if self.args().frame_paced {
-            window.surface.frame(qh, FrameCallback);
-            self.frame_pending = true;
+        surface.attach(Some(&buffer), 0, 0);
+        surface.damage_buffer(0, 0, i32::MAX, i32::MAX);
+    }
+
+    fn open_popup(
+        &mut self,
+        (x, y, width, height): (i32, i32, u32, u32),
+        color: u32,
+        grab: bool,
+        reactive: bool,
+        qh: &QueueHandle<Self>,
+    ) {
+        if let Some(old) = self.popup.take() {
+            old.popup.destroy();
+            old.xdg_surface.destroy();
+            old.surface.destroy();
         }
-        window.surface.commit();
+        let wm_base = self.wm_base.as_ref().unwrap();
+        let positioner = wm_base.create_positioner(qh, ());
+        positioner.set_size(width as i32, height as i32);
+        positioner.set_anchor_rect(x, y, 1, 1);
+        positioner.set_anchor(xdg_positioner::Anchor::TopLeft);
+        positioner.set_gravity(xdg_positioner::Gravity::BottomRight);
+        positioner.set_constraint_adjustment(
+            xdg_positioner::ConstraintAdjustment::SlideX
+                | xdg_positioner::ConstraintAdjustment::SlideY,
+        );
+        if reactive {
+            positioner.set_reactive();
+        }
+        let surface = self
+            .compositor
+            .as_ref()
+            .unwrap()
+            .create_surface(qh, PopupData);
+        let xdg_surface = wm_base.get_xdg_surface(&surface, qh, PopupData);
+        let window = self.window.as_ref().unwrap();
+        let popup = xdg_surface.get_popup(Some(&window.xdg_surface), &positioner, qh, ());
+        positioner.destroy();
+        if grab {
+            if let Some((seat, serial)) = &self.last_button {
+                popup.grab(seat, *serial);
+            } else {
+                emit(json!({"event": "command_error", "message": "no button press for grab"}));
+            }
+        }
+        surface.commit();
+        self.popup = Some(Popup {
+            surface,
+            xdg_surface,
+            popup,
+            color,
+            size: (width, height),
+        });
     }
 
     fn handle_command(&mut self, line: &str, conn: &Connection, qh: &QueueHandle<Self>) {
@@ -280,6 +381,23 @@ impl State {
                 self.size = Some((width, height));
                 self.draw(qh);
                 emit(json!({"event": "redrawn"}));
+            }
+            Command::Popup {
+                x,
+                y,
+                width,
+                height,
+                color,
+                grab,
+                reactive,
+            } => {
+                let Some(color) = parse_color(&color) else {
+                    emit(
+                        json!({"event": "command_error", "message": format!("invalid color: {color}")}),
+                    );
+                    return;
+                };
+                self.open_popup((x, y, width, height), color, grab, reactive, qh);
             }
             Command::Sync => {
                 conn.display().sync(qh, ());
@@ -449,7 +567,7 @@ fn main() {
     surface.commit();
     state.window = Some(Window {
         surface,
-        _xdg_surface: xdg_surface,
+        xdg_surface,
         toplevel,
         _decoration: decoration,
     });
@@ -715,8 +833,12 @@ impl Dispatch<WlPointer, WlSeat> for State {
                 ..
             } => {
                 state.pointer_on_surface = state.is_our_surface(&surface);
+                state.pointer_on_popup = state.is_popup_surface(&surface);
                 if state.pointer_on_surface {
                     emit(json!({"event": "pointer_enter", "x": surface_x, "y": surface_y}));
+                }
+                if state.pointer_on_popup {
+                    emit(json!({"event": "popup_pointer_enter", "x": surface_x, "y": surface_y}));
                 }
             }
             wl_pointer::Event::Leave { surface, .. } => {
@@ -724,6 +846,18 @@ impl Dispatch<WlPointer, WlSeat> for State {
                     state.pointer_on_surface = false;
                     emit(json!({"event": "pointer_leave"}));
                 }
+                if state.is_popup_surface(&surface) {
+                    state.pointer_on_popup = false;
+                    emit(json!({"event": "popup_pointer_leave"}));
+                }
+            }
+            wl_pointer::Event::Button {
+                button,
+                state: button_state,
+                ..
+            } if state.pointer_on_popup => {
+                let pressed = button_state == WEnum::Value(wl_pointer::ButtonState::Pressed);
+                emit(json!({"event": "popup_pointer_button", "button": button, "pressed": pressed}));
             }
             wl_pointer::Event::Motion {
                 surface_x,
@@ -798,6 +932,93 @@ delegate_noop!(State: WlCompositor);
 delegate_noop!(State: WlShmPool);
 delegate_noop!(State: ignore WlShm);
 delegate_noop!(State: ZxdgDecorationManagerV1);
+delegate_noop!(State: XdgPositioner);
+
+impl Dispatch<XdgPopup, ()> for State {
+    fn event(
+        state: &mut Self,
+        _: &XdgPopup,
+        event: xdg_popup::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            // Position relative to the window's surface, drawn on the xdg_surface configure.
+            xdg_popup::Event::Configure {
+                x,
+                y,
+                width,
+                height,
+            } => {
+                if let Some(popup) = state.popup.as_mut() {
+                    popup.size = (width.max(1) as u32, height.max(1) as u32);
+                }
+                emit(json!({
+                    "event": "popup_configure",
+                    "x": x,
+                    "y": y,
+                    "width": width,
+                    "height": height,
+                }));
+            }
+            xdg_popup::Event::PopupDone => {
+                if let Some(popup) = state.popup.take() {
+                    popup.popup.destroy();
+                    popup.xdg_surface.destroy();
+                    popup.surface.destroy();
+                }
+                state.pointer_on_popup = false;
+                emit(json!({"event": "popup_done"}));
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<XdgSurface, PopupData> for State {
+    fn event(
+        state: &mut Self,
+        xdg_surface: &XdgSurface,
+        event: xdg_surface::Event,
+        _: &PopupData,
+        _: &Connection,
+        qh: &QueueHandle<Self>,
+    ) {
+        let xdg_surface::Event::Configure { serial } = event else {
+            return;
+        };
+        xdg_surface.ack_configure(serial);
+        let Some(popup) = state.popup.as_ref() else {
+            return;
+        };
+        let ((width, height), color, surface) = (popup.size, popup.color, popup.surface.clone());
+        state.attach_buffer(&surface, width, height, color, qh);
+        surface.commit();
+        emit(json!({"event": "popup_drawn"}));
+    }
+}
+
+impl Dispatch<WlSurface, PopupData> for State {
+    fn event(
+        state: &mut Self,
+        _: &WlSurface,
+        event: wl_surface::Event,
+        _: &PopupData,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            wl_surface::Event::Enter { output } => {
+                emit(json!({"event": "popup_enter", "output": state.output_name(&output)}));
+            }
+            wl_surface::Event::Leave { output } => {
+                emit(json!({"event": "popup_leave", "output": state.output_name(&output)}));
+            }
+            _ => {}
+        }
+    }
+}
 
 /// User data of frame callbacks, to tell them from `sync` callbacks.
 struct FrameCallback;
