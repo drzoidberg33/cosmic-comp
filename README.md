@@ -25,6 +25,8 @@ across monitors.
 - **Stacking:** the overhang stacks with the other display's floating windows the way
   windows on one display do: whichever was focused last is on top, on every display it
   appears on. Tiled windows stay below floating ones, as on a single display.
+- **Menus:** a menu opened from the part of a window on another display opens there, and
+  is kept on that display instead of being pushed back across the seam.
 - **Resizing:** edges follow the pointer across display boundaries. A window that ends up
   entirely on another display moves there in place.
 - **Layouts:** any arrangement, side by side or stacked, and both workspace modes (per
@@ -33,7 +35,6 @@ across monitors.
 
 **Known limitations:**
 - Only floating windows span; tiled, maximized and sticky windows don't.
-- Popups of a spanning window aren't shown on the other display yet.
 - When workspaces are switched, the overhang doesn't follow the slide animation.
 - Panels and docks only see the window on its home display.
 
@@ -141,7 +142,7 @@ feature and the development conventions in detail.
 
 ## Benchmarks
 
-A/B comparison of the branch's final code (`2c434c11`) against the code the work started
+A/B comparison of the branch's final code (`411e4448`) against the code the work started
 from.
 
 **Baseline:** the starting commit `0fbd457` can't be benchmarked directly, because it has no
@@ -167,43 +168,40 @@ Sending frame callbacks after each frame isn't benchmarked.
 
 | Scenario | Metric | Baseline | Final | Change |
 |---|---|---:|---:|---:|
-| 1 display, 1 window | frame | 188.2µs | 187.4µs | −0.4% |
-| | pointer lookup | 2.73µs | 2.76µs | +1.1% |
-| | refresh | 1.44µs | 1.59µs | +0.15µs |
-| 2 displays, 10 windows | frame, display with windows | 498.9µs | 502.2µs | +0.7% |
-| | frame, empty display | 112.9µs | 122.8µs | +8.7%¹ |
-| | pointer lookup | 6.96µs | 7.05µs | +1.3% |
-| | refresh | 8.53µs | 10.01µs | +1.48µs |
+| 1 display, 1 window | frame | 193.8µs | 187.8µs | −3.1% |
+| | pointer lookup | 2.74µs | 2.71µs | −1.1% |
+| | refresh | 1.44µs | 1.55µs | +0.11µs |
+| 2 displays, 10 windows | frame, display with windows | 507.7µs | 511.6µs | +0.8% |
+| | frame, empty display | 112.6µs | 115.4µs | +2.5% |
+| | pointer lookup | 6.88µs | 7.11µs | +3.3% |
+| | refresh | 8.54µs | 9.95µs | +1.41µs |
 
-Rendering and input are within noise. Refresh is up 0.15–1.5µs; it runs at most every
+Rendering and input are within noise. Refresh is up 0.1–1.4µs; it runs at most every
 150ms, so that's about 0.001% of a CPU core.
-
-¹ Two reruns of this scenario measured +4.2% and +3.9%, and earlier runs between +0.2% and
-+4.3%. None of the new code runs for a display without overhanging windows, so this is
-noise; an A/A run stays within ±4%.
 
 ### With windows spanning displays
 
 | Scenario | Metric | Baseline | Final | Change |
 |---|---|---:|---:|---:|
-| 2 displays, 10 windows, 1 spanning | frame, display the window overhangs | 111.5µs | 178.5µs | +67µs |
-| | pointer lookup | 6.83µs | 6.97µs | +0.14µs |
-| 2 displays, 5 windows all spanning | frame, display the windows overhang | 111.6µs | 284.2µs | +173µs |
-| | pointer lookup | 1.39µs | 3.27µs | +1.9µs |
-| 4 displays, 20 windows, 4 spanning | frame, worst display | 321.2µs | 394.4µs | +73µs |
-| | pointer lookup | 4.79µs | 7.98µs | +3.2µs |
-| | refresh | 17.19µs | 24.31µs | +7.1µs |
-| 3 stacked displays, 6 windows, 3 spanning | frame, worst display | 172.8µs | 247.9µs | +75µs |
-| 2 displays (1x + 2x scale), 1 spanning | frame, 2x display | 151.7µs | 239.4µs | +88µs |
+| 2 displays, 10 windows, 1 spanning | frame, display the window overhangs | 110.2µs | 182.1µs | +72µs |
+| | pointer lookup | 6.80µs | 7.16µs | +0.36µs |
+| 2 displays, 5 windows all spanning | frame, display the windows overhang | 111.0µs | 296.5µs | +185µs |
+| | pointer lookup | 1.38µs | 3.89µs | +2.5µs |
+| 4 displays, 20 windows, 4 spanning | frame, worst display | 330.3µs | 396.0µs | +66µs |
+| | pointer lookup | 4.76µs | 8.64µs | +3.9µs |
+| | refresh | 17.22µs | 24.37µs | +7.2µs |
+| 3 stacked displays, 6 windows, 3 spanning | frame, worst display | 176.7µs | 245.9µs | +69µs |
+| 2 displays (1x + 2x scale), 1 spanning | frame, 2x display | 151.7µs | 241.7µs | +90µs |
 
 The extra frame time is the overhanging windows actually being drawn on the second display.
-That costs about as much as drawing them on their own display: 5 windows cost +173µs on the
-display they overhang, against ~174µs on their home display. The slowest frame measured,
-394µs, is 2.4% of a 60Hz frame (16.7ms).
+That costs about as much as drawing them on their own display: 5 windows cost +185µs on the
+display they overhang, against ~175µs on their home display. The slowest frame measured,
+396µs, is 2.4% of a 60Hz frame (16.7ms).
 
 The pointer lookups' extra time is partly real hit-testing: in the baseline, the points
-over the overhang hit empty desktop, and they now also have to find which window is on top.
-At most it's +3.2µs per pointer event, which is about 0.3% of a CPU core at 1000Hz.
+over the overhang hit empty desktop, and they now also have to find which window is on top
+and check for open menus. At most it's +3.9µs per pointer event, which is about 0.4% of a
+CPU core at 1000Hz.
 
 All results are within the budgets in `test-harness/src/bin/bench.rs`:
 - **Without spanning windows:** no more than +10–15% and a few µs over the baseline.
